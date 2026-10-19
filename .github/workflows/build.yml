@@ -137,17 +137,34 @@ jobs:
           MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
           make -j$(nproc) $MAKE_ARGS modules
           rm -rf ../modules_out
-          # INSTALL_MOD_STRIP=1 makes the kernel build run ${CROSS_COMPILE}strip
-          # --strip-debug on every .ko as it installs. Modules straight out of
-          # the build carry full DWARF and the tree comes to ~127 MB, which can
-          # never fit the 19,685,376-byte vendor_dlkm partition; stripped it
-          # lands in the same neighbourhood as the stock module set.
           make -j$(nproc) $MAKE_ARGS \
             INSTALL_MOD_PATH="$PWD/../modules_out" \
-            INSTALL_MOD_STRIP=1 \
             modules_install
-          echo "modules: $(find ../modules_out -name '*.ko' | wc -l)"
-          echo "bytes:   $(find ../modules_out -name '*.ko' -printf '%s\n' | awk '{s+=$1} END {print s}')"
+
+          # INSTALL_MOD_STRIP=1 does nothing useful here: with STRIP=llvm-strip
+          # the kernel build passes the value through as a strip argument, and
+          # modules came out of modules_install at full size - measured
+          # 113,854,768 bytes, identical to unstripped. Strip explicitly.
+          # --strip-debug removes only DWARF and leaves .symtab and the .modinfo
+          # vermagic section alone, so module loading is unaffected.
+          find ../modules_out -name '*.ko' -print0 \
+            | xargs -0 -r llvm-strip --strip-debug
+
+          MCOUNT=$(find ../modules_out -name '*.ko' | wc -l)
+          MBYTES=$(find ../modules_out -name '*.ko' -printf '%s\n' | awk '{s+=$1} END {print s}')
+          DHD=$(find ../modules_out -name 'dhd.ko' | head -1)
+          echo "modules: $MCOUNT"
+          echo "bytes:   $MBYTES"
+          echo "dhd.ko:  $(stat -c%s "$DHD") bytes"
+          echo "vermagic in dhd.ko: $(strings "$DHD" | grep -c '^vermagic=')"
+
+          # The stock module set is 57 MB here and compresses to 19,079,168
+          # bytes. Anything near double that will not fit the 19,685,376-byte
+          # vendor_dlkm partition, so fail now rather than during repack.
+          if [ "$MBYTES" -gt 70000000 ]; then
+            echo "FATAL: stripped modules still $MBYTES bytes - will not fit vendor_dlkm"
+            exit 1
+          fi
 
       - name: Verify vermagic and required modules
         run: |

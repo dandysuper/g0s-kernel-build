@@ -226,9 +226,19 @@ def build_vendor_dlkm(module_dir, modules_load, src_dep, out_img):
     # image of the stock module set is 19,079,168 bytes, so there is ~592 KB of
     # headroom - real, but not generous. Climb the compression ladder instead of
     # failing if a future module set grows past the ceiling.
+    # lz4hc accepts levels 1-12 only; 14/16 are rejected by mkfs.erofs and used
+    # to abort the ladder instead of falling through. Each attempt is therefore
+    # allowed to fail and simply moves on.
     data = None
-    for spec in ("lz4hc,12", "lz4hc,14", "lz4hc,16", "lz4,9"):
-        run_quiet(["mkfs.erofs", "-b", "4096", "-z", spec, tmp_img, staging])
+    for spec in ("lz4hc,12", "lz4hc,9", "lz4,9", "lz4,1"):
+        proc = subprocess.run(
+            ["mkfs.erofs", "-b", "4096", "-z", spec, tmp_img, staging],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            print(f"  erofs {spec:<10} unsupported, skipped")
+            continue
         size = os.path.getsize(tmp_img)
         print(f"  erofs {spec:<10} {size} bytes / {VENDOR_DLKM_SIZE} limit")
         if size <= VENDOR_DLKM_SIZE:
@@ -236,6 +246,7 @@ def build_vendor_dlkm(module_dir, modules_load, src_dep, out_img):
                 data = fh.read()
             print(f"  settled on: {spec}")
             break
+
     if data is None:
         sys.exit(
             "FATAL: vendor_dlkm does not fit even at maximum compression - "
