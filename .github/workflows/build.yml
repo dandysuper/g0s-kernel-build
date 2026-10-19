@@ -7,8 +7,10 @@ on:
 
 jobs:
   build:
+    # ThinLTO roughly doubles link time versus LTO_NONE, so the ceiling moves
+    # from 240 to 350 minutes to keep a slow runner from masking a real failure.
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 350
     permissions:
       contents: write
 
@@ -98,7 +100,39 @@ jobs:
           scripts/config --file out/.config --disable CMUCAL_DEBUG
           scripts/config --file out/.config --disable CMUCAL_DEBUG_MODULE
 
+          # ThinLTO is what makes this kernel fit its partitions.
+          #
+          # Measured against the stock ExtremeKRNL build: the stock Image is
+          # 28,965,376 bytes and its 319 modules total 58,998,976 bytes. Built
+          # from s5e9925_defconfig + g0s.config with LTO_NONE this tree produced
+          # a 53,348,864-byte Image and 113,854,768 bytes of modules - a uniform
+          # 1.84x inflation across every module and the Image alike, with .data
+          # collapsing 10x and .rela.data disappearing entirely under ThinLTO's
+          # whole-program dead-code elimination.
+          #
+          # That inflation is fatal, not cosmetic: vendor_dlkm is a fixed
+          # 19,685,376-byte partition, and the unstripped, non-LTO module set
+          # compresses to 30,330,880 bytes at lz4hc,12 - it cannot fit. ThinLTO
+          # brings the module set back to the stock footprint.
+          scripts/config --file out/.config --disable LTO_NONE
+          scripts/config --file out/.config --enable LTO_CLANG
+          scripts/config --file out/.config --enable LTO_CLANG_THIN
+          scripts/config --file out/.config --enable LD_IS_LLD
+
           make -j$(nproc) O=out olddefconfig
+
+          # A choice symbol can be silently overridden by olddefconfig, and a
+          # silent fall back to LTO_NONE costs a full ~90-minute build and
+          # produces modules that do not fit. Fail here instead.
+          grep -q "^CONFIG_LTO_CLANG_THIN=y" out/.config || {
+            echo "FATAL: ThinLTO did not stick - modules will not fit vendor_dlkm"
+            grep -E "^CONFIG_LTO" out/.config || true
+            exit 1
+          }
+          grep -q "^CONFIG_LD_IS_LLD=y" out/.config || {
+            echo "FATAL: LTO_CLANG_THIN requires CONFIG_LD_IS_LLD=y"; exit 1
+          }
+          echo "ThinLTO confirmed: $(grep -E '^CONFIG_LTO_CLANG_THIN=y' out/.config)"
 
           echo "================ FINAL CONFIG (critical symbols) ================"
           grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_DEBUG_FS|CONFIG_CMUCAL_DEBUG|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
