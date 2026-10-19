@@ -72,13 +72,23 @@ jobs:
           scripts/kconfig/merge_config.sh -m -O out \
             out/.config arch/arm64/configs/g0s.config
 
-          # KernelSU must be enabled explicitly
+          # KernelSU and DEBUG_FS must be enabled explicitly.
+          #
+          # DEBUG_FS is not optional here. In drivers/soc/samsung/cal-if:
+          #   cmucal-debug.c  defines and EXPORT_SYMBOL_GPL(vclk_debug_init)
+          #                   only inside "#ifdef CONFIG_DEBUG_FS"
+          #   vclk.h          declares it "extern" whenever CONFIG_CMUCAL_DEBUG
+          #                   is set, and CMUCAL_DEBUG is "tristate ... default y"
+          # So with DEBUG_FS off the symbol is declared but never defined, and
+          # modpost fails the module set with:
+          #   "vclk_debug_init" [..../cmupmucal.ko] undefined!
           scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable DEBUG_FS
 
           make -j$(nproc) O=out olddefconfig
 
           echo "================ FINAL CONFIG (critical symbols) ================"
-          grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
+          grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_DEBUG_FS|CONFIG_CMUCAL_DEBUG|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
           echo "================================================================"
 
           # Hard gates — fail fast instead of shipping a broken kernel
@@ -86,6 +96,7 @@ jobs:
           grep -q "^CONFIG_BCMDHD_PCIE=y"    out/.config || { echo "FATAL: CONFIG_BCMDHD_PCIE=y missing"; exit 1; }
           grep -q "^CONFIG_BT_BCM43XX=m"     out/.config || { echo "FATAL: CONFIG_BT_BCM43XX=m missing"; exit 1; }
           grep -q "^CONFIG_KSU=y"            out/.config || { echo "FATAL: CONFIG_KSU=y missing"; exit 1; }
+          grep -q "^CONFIG_DEBUG_FS=y"       out/.config || { echo "FATAL: CONFIG_DEBUG_FS=y missing - vclk_debug_init will be undefined"; exit 1; }
           if grep -q "^CONFIG_R11S_WIRELESS=y" out/.config; then
             echo "FATAL: r11s wireless enabled on a g0s build"; exit 1
           fi
