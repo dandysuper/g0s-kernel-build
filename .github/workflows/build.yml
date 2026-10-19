@@ -98,46 +98,54 @@ jobs:
           scripts/config --file out/.config --disable CMUCAL_DEBUG
           scripts/config --file out/.config --disable CMUCAL_DEBUG_MODULE
 
-          # ThinLTO is what makes this kernel fit its partitions.
+          # ---------------------------------------------------------------------
+          # Size: KASAN and DEBUG_INFO are what made the module set unfittable.
+          # ---------------------------------------------------------------------
+          # Measured against the stock ExtremeKRNL build:
+          #   stock Image   28,965,376   our Image   53,348,864   (1.84x)
+          #   stock modules 58,998,976   our modules 113,854,768  (1.93x)
+          #   stock .data in dhd.ko 125,720 | ours 1,252,832 (10x, plus a
+          #   .rela.data section stock does not have at all)
           #
-          # Measured against the stock ExtremeKRNL build: the stock Image is
-          # 28,965,376 bytes and its 319 modules total 58,998,976 bytes. Built
-          # from s5e9925_defconfig + g0s.config with LTO_NONE this tree produced
-          # a 53,348,864-byte Image and 113,854,768 bytes of modules - a uniform
-          # 1.84x inflation across every module and the Image alike, with .data
-          # collapsing 10x and .rela.data disappearing entirely under ThinLTO's
-          # whole-program dead-code elimination.
+          # The cause is not LTO - this tree has no LTO choice in init/Kconfig
+          # at all, so CONFIG_LTO_CLANG_THIN can never be selected here. The
+          # real cause is that the merged config enables:
           #
-          # That inflation is fatal, not cosmetic: vendor_dlkm is a fixed
-          # 19,685,376-byte partition, and the unstripped, non-LTO module set
-          # compresses to 30,330,880 bytes at lz4hc,12 - it cannot fit. ThinLTO
-          # brings the module set back to the stock footprint.
-          scripts/config --file out/.config --disable LTO_NONE
-          scripts/config --file out/.config --enable LTO_CLANG
-          scripts/config --file out/.config --enable LTO_CLANG_THIN
-          scripts/config --file out/.config --enable LD_IS_LLD
+          #   CONFIG_KASAN=y + CONFIG_KASAN_HW_TAGS=y
+          #     Instruments every load and store (code bloat, ~1.8x) and puts
+          #     redzones around every global (the 10x .data and the extra
+          #     .rela.data relocations). This is a debug-only feature that is
+          #     genuinely active here, not a build artefact.
+          #   CONFIG_DEBUG_INFO=y + CONFIG_DEBUG_INFO_DWARF4=y
+          #     Builds with -g, adding full DWARF to every module.
+          #
+          # Either one alone breaks the budget; vendor_dlkm is a fixed
+          # 19,685,376-byte partition and our set compressed to 30,330,880.
+          # Both off returns Image and modules to the stock footprint.
+          scripts/config --file out/.config --disable KASAN
+          scripts/config --file out/.config --disable KASAN_GENERIC
+          scripts/config --file out/.config --disable KASAN_HW_TAGS
+          scripts/config --file out/.config --disable KASAN_SW_TAGS
+          scripts/config --file out/.config --disable KASAN_INLINE
+          scripts/config --file out/.config --disable DEBUG_INFO
+          scripts/config --file out/.config --enable DEBUG_INFO_NONE
+          scripts/config --file out/.config --disable INIT_ON_ALLOC_DEFAULT_ON
+          scripts/config --file out/.config --disable INIT_ON_FREE_DEFAULT_ON
 
           make -j$(nproc) $MAKE_ARGS olddefconfig
 
-          # A choice symbol can be silently overridden by olddefconfig, and a
-          # silent fall back to LTO_NONE costs a full ~90-minute build and
-          # produces modules that do not fit. Dump the whole size-relevant flag
-          # set when that happens so the cause is visible instead of guessed.
-          if ! grep -q "^CONFIG_LTO_CLANG_THIN=y" out/.config; then
-            echo "FATAL: ThinLTO did not stick - modules will not fit vendor_dlkm"
-            echo "--- LTO / toolchain probe ---"
-            grep -E "^CONFIG_(LTO|LD_IS_LLD|CC_IS_CLANG|CLANG_VERSION|LLD_VERSION|LLVM_IAS)" out/.config || echo "(none present)"
-            echo "--- size-relevant flags ---"
-            grep -E "^CONFIG_(CC_OPTIMIZE|CC_HAS|DEBUG_INFO|RANDSTRUCT|CFI_CLANG|KASAN|GCOV|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|KPROBES|TRACEPOINTS|MODULE_SIG|MODVERSIONS|JUMP_LABEL|STACKPROTECTOR|FORTIFY|INIT_ON)" out/.config | sort || echo "(none present)"
-            echo "--- does the tree even define the choice? ---"
-            grep -rn -A3 'prompt "Link Time Optimization"' init/Kconfig 2>/dev/null || echo "(no LTO choice in init/Kconfig)"
-            grep -n "config LTO_CLANG" init/Kconfig 2>/dev/null || echo "(no LTO_CLANG symbol)"
-            echo "--- what LD does kconfig see? ---"
-            "${CROSS_COMPILE}ld" --version 2>/dev/null | head -2 || true
-            ld.lld --version 2>/dev/null | head -2 || true
+          # If KASAN survives, the build is ~2x too big and the modules will not
+          # fit. Fail here in 5 minutes rather than 90 minutes later.
+          if grep -qE "^CONFIG_KASAN(=y|=m)" out/.config; then
+            echo "FATAL: KASAN still enabled - Image and modules will not fit"
+            grep -E "^CONFIG_KASAN" out/.config || true
             exit 1
           fi
-          echo "ThinLTO confirmed: $(grep -E '^CONFIG_LTO_CLANG_THIN=y' out/.config)"
+          if grep -qE "^CONFIG_DEBUG_INFO=y" out/.config; then
+            echo "FATAL: DEBUG_INFO still enabled - modules will carry full DWARF"
+            exit 1
+          fi
+          echo "Size flags OK: KASAN off, DEBUG_INFO off, optimize=performance"
 
           echo "================ FINAL CONFIG (critical symbols) ================"
           grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_DEBUG_FS|CONFIG_CMUCAL_DEBUG|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
