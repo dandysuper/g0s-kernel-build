@@ -165,10 +165,15 @@ jobs:
 
           [ -n "$KVM" ] || { echo "FATAL: no vermagic in Image"; exit 1; }
           [ -n "$MVM" ] || { echo "FATAL: no vermagic in $SAMPLE"; exit 1; }
-          if [ "$KVM" != "$MVM" ]; then
-            echo "FATAL: vermagic mismatch - kernel vs module"; exit 1
-          fi
-          echo "vermagic OK - duplicates would not be possible from one build tree"
+
+          # The Image carries the bare release (5.10.260-g<hash>[-dirty]) while a
+          # module carries that release followed by its flags
+          # ("... SMP preempt mod_unload modversions aarch64"). Equality is the
+          # wrong comparison - the module string must START WITH the release.
+          case "$MVM" in
+            "$KVM"*) echo "vermagic OK - module vermagic is prefixed by the kernel release" ;;
+            *) echo "FATAL: vermagic mismatch - kernel '$KVM' is not a prefix of module '$MVM'"; exit 1 ;;
+          esac
 
           for m in dhd.ko cfg80211.ko bcm43xx.ko; do
             path=$(find ../modules_out -name "$m" | head -1)
