@@ -1,0 +1,154 @@
+name: Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout kernel source
+        run: |
+          set -e
+          git clone --depth=1 -b lineage-24.0 \
+            https://github.com/ExtremeXT/android_kernel_samsung_s5e9925.git kernel
+          cd kernel
+          echo "HEAD: $(git log -1 --oneline)"
+          echo "VERSION=$(make kernelversion 2>/dev/null || true)" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential ccache cpio curl flex \
+            binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu \
+            libelf-dev libssl-dev liblz4-tool lz4 lzop \
+            python3 rsync xz-utils zip unzip zlib1g-dev kmod device-tree-compiler
+
+      - name: Fetch clang toolchain
+        run: |
+          set -e
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            clang-prebuilt
+          echo "$PWD/clang-prebuilt/bin" >> $GITHUB_PATH
+          "$PWD/clang-prebuilt/bin/clang" --version
+
+      - name: Apply KernelSU Next
+        run: |
+          set -e
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          echo "--- KSU Kconfig present? ---"
+          grep -rn "config KSU" drivers/Kconfig drivers/kernelsu/Kconfig 2>/dev/null || true
+          echo "--- drivers/kernelsu ---"
+          ls -la drivers/kernelsu 2>/dev/null | head
+
+      - name: Configure (g0s, not r11s)
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$PWD/../clang-prebuilt/bin:$PATH"
+
+          make -j$(nproc) \
+            O=out \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            s5e9925_defconfig
+
+          scripts/kconfig/merge_config.sh -m -O out \
+            out/.config arch/arm64/configs/g0s.config
+
+          # KernelSU must be enabled explicitly
+          scripts/config --file out/.config --enable KSU
+
+          make -j$(nproc) O=out olddefconfig
+
+          echo "================ FINAL CONFIG (critical symbols) ================"
+          grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
+          echo "================================================================"
+
+          # Hard gates — fail fast instead of shipping a broken kernel
+          grep -q "^CONFIG_BCM4389=m"        out/.config || { echo "FATAL: CONFIG_BCM4389=m missing"; exit 1; }
+          grep -q "^CONFIG_BCMDHD_PCIE=y"    out/.config || { echo "FATAL: CONFIG_BCMDHD_PCIE=y missing"; exit 1; }
+          grep -q "^CONFIG_BT_BCM43XX=m"     out/.config || { echo "FATAL: CONFIG_BT_BCM43XX=m missing"; exit 1; }
+          grep -q "^CONFIG_KSU=y"            out/.config || { echo "FATAL: CONFIG_KSU=y missing"; exit 1; }
+          if grep -q "^CONFIG_R11S_WIRELESS=y" out/.config; then
+            echo "FATAL: r11s wireless enabled on a g0s build"; exit 1
+          fi
+          echo "All config gates passed."
+
+      - name: Build kernel image
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export PATH="$PWD/../clang-prebuilt/bin:$PATH"
+          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+          make -j$(nproc) $MAKE_ARGS Image
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: Build modules
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export PATH="$PWD/../clang-prebuilt/bin:$PATH"
+          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+          make -j$(nproc) $MAKE_ARGS modules
+          rm -rf ../modules_out
+          make -j$(nproc) $MAKE_ARGS INSTALL_MOD_PATH="$PWD/../modules_out" modules_install
+          find ../modules_out -name '*.ko' | wc -l
+
+      - name: Verify vermagic matches what the ROM expects
+        run: |
+          set -e
+          cd kernel
+          KVER=$(make kernelversion)
+          echo "kernelversion: $KVER"
+          echo "--- kernel vermagic ---"
+          strings out/arch/arm64/boot/Image | grep -E "^[0-9]+\.[0-9]+\.[0-9]+.*SMP preempt" | head -3 || true
+          echo "--- sample module vermagic ---"
+          SAMPLE=$(find ../modules_out -name '*.ko' | head -1)
+          echo "sample: $SAMPLE"
+          strings "$SAMPLE" | grep -E "vermagic=" | head -3 || true
+          echo "--- dhd.ko / bcm present? ---"
+          find ../modules_out -name 'dhd.ko' -o -name 'bcm*.ko' | head -10
+
+      - name: Package artifacts
+        run: |
+          set -e
+          cd kernel
+          mkdir -p ../artifact
+          cp out/arch/arm64/boot/Image ../artifact/Image
+          tar -C ../modules_out -czf ../artifact/modules.tar.gz .
+          cd ../artifact
+          ls -lh
+          echo "$(date -u +%Y%m%d-%H%M)" > build-stamp.txt
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-Image
+          path: artifact/Image
+          retention-days: 30
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-modules
+          path: artifact/modules.tar.gz
+          retention-days: 30
