@@ -1,0 +1,11 @@
+# Build workspace - never tracked
+work/
+out/
+artifact/
+modules_out/
+
+# Sparse kernel clone used only for diagnosis
+ksrc/
+
+# scratch captures from CI polling
+ci/

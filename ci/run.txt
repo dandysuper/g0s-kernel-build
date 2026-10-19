@@ -1,5 +1,0 @@
-Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	active	389327206
---- DISPATCH ---
-https://github.com/dandysuper/g0s-kernel-build/actions/runs/39244401776
---- RUNS ---
-in_progress		Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	master	workflow_dispatch	39244401776	16s	2026-10-19T11:24:26Z

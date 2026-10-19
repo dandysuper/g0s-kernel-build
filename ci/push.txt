@@ -1,4 +1,0 @@
-To https://github.com/dandysuper/g0s-kernel-build.git
-   36ea07c..5bb7ac6  HEAD -> master
---- TREE ---
-build.yml

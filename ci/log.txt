@@ -1,4 +1,0 @@
-       1 ci/log_raw.txt
-=== LAST 25 LINES ===
-job 118032700928 is still in progress; logs will be available when it is complete
-=== ERRORS ===
