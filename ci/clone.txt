@@ -1,0 +1,33 @@
+Cloning into 'ksrc'...
+Updating files:   2% (1/41)Updating files:   4% (2/41)Updating files:   7% (3/41)Updating files:   9% (4/41)Updating files:  12% (5/41)Updating files:  14% (6/41)Updating files:  17% (7/41)Updating files:  19% (8/41)Updating files:  21% (9/41)Updating files:  24% (10/41)Updating files:  26% (11/41)Updating files:  29% (12/41)Updating files:  31% (13/41)Updating files:  34% (14/41)Updating files:  36% (15/41)Updating files:  39% (16/41)Updating files:  41% (17/41)Updating files:  43% (18/41)Updating files:  46% (19/41)Updating files:  48% (20/41)Updating files:  51% (21/41)Updating files:  53% (22/41)Updating files:  56% (23/41)Updating files:  58% (24/41)Updating files:  60% (25/41)Updating files:  63% (26/41)Updating files:  65% (27/41)Updating files:  68% (28/41)Updating files:  70% (29/41)Updating files:  73% (30/41)Updating files:  75% (31/41)Updating files:  78% (32/41)Updating files:  80% (33/41)Updating files:  82% (34/41)Updating files:  85% (35/41)Updating files:  87% (36/41)Updating files:  90% (37/41)Updating files:  92% (38/41)Updating files:  95% (39/41)Updating files:  97% (40/41)Updating files: 100% (41/41)Updating files: 100% (41/41), done.
+=== vclk_debug_init DEFINITIONS ===
+./drivers/soc/samsung/cal-if/vclk.h:130:extern int vclk_debug_init(void);
+./drivers/soc/samsung/cal-if/vclk.h:133:static inline int vclk_debug_init(void)
+./drivers/soc/samsung/cal-if/cal-if.c:677:	vclk_debug_init();
+./drivers/soc/samsung/cal-if/cmucal-debug.c:812: * vclk_debug_init - lazily create the debugfs clk tree visualization
+./drivers/soc/samsung/cal-if/cmucal-debug.c:814:int vclk_debug_init(void)
+./drivers/soc/samsung/cal-if/cmucal-debug.c:883:EXPORT_SYMBOL_GPL(vclk_debug_init);
+=== FILES ===
+pmucal
+s5e9925
+s5e9925_evt0
+acpm_dvfs.c
+acpm_dvfs.h
+asv.h
+cal-if.c
+cmu_ewf.c
+cmucal-debug.c
+cmucal.c
+cmucal.h
+exynos_debug_freq.c
+fvmap.c
+Makefile
+pll_spec.c
+pwrcal-env.h
+pwrcal-rae.h
+pwrcal.h
+ra.c
+ra.h
+system.h
+vclk.c
+vclk.h

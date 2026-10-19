@@ -1,0 +1,69 @@
+arch
+drivers
+build.config.aarch64
+build.config.allmodconfig
+build.config.allmodconfig.aarch64
+build.config.allmodconfig.arm
+build.config.allmodconfig.x86_64
+build.config.amlogic
+build.config.arm
+build.config.common
+build.config.db845c
+build.config.gki
+build.config.gki-debug.aarch64
+build.config.gki-debug.x86_64
+build.config.gki.aarch64
+build.config.gki.aarch64.fips140
+build.config.gki.aarch64.fips140_eval_testing
+build.config.gki.x86_64
+build.config.gki_kasan
+build.config.gki_kasan.aarch64
+build.config.gki_kasan.x86_64
+build.config.gki_kprobes
+build.config.gki_kprobes.aarch64
+build.config.gki_kprobes.x86_64
+build.config.hikey960
+build.config.khwasan
+build.config.rockchip
+build.config.x86_64
+COPYING
+CREDITS
+Kbuild
+Kconfig
+MAINTAINERS
+Makefile
+OWNERS
+README
+README.md
+=== vclk_debug_init ===
+ksrc/drivers/soc/samsung/cal-if/vclk.h:130:extern int vclk_debug_init(void);
+ksrc/drivers/soc/samsung/cal-if/vclk.h:133:static inline int vclk_debug_init(void)
+ksrc/drivers/soc/samsung/cal-if/cal-if.c:677:	vclk_debug_init();
+ksrc/drivers/soc/samsung/cal-if/cmucal-debug.c:812: * vclk_debug_init - lazily create the debugfs clk tree visualization
+ksrc/drivers/soc/samsung/cal-if/cmucal-debug.c:814:int vclk_debug_init(void)
+ksrc/drivers/soc/samsung/cal-if/cmucal-debug.c:883:EXPORT_SYMBOL_GPL(vclk_debug_init);
+=== cal-if files ===
+pmucal
+s5e9925
+s5e9925_evt0
+acpm_dvfs.c
+acpm_dvfs.h
+asv.h
+cal-if.c
+cmu_ewf.c
+cmucal-debug.c
+cmucal.c
+cmucal.h
+exynos_debug_freq.c
+fvmap.c
+Makefile
+pll_spec.c
+pwrcal-env.h
+pwrcal-rae.h
+pwrcal.h
+ra.c
+ra.h
+system.h
+vclk.c
+vclk.h
+=== config CMU/VCLK/EWF ===

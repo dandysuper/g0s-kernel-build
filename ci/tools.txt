@@ -1,0 +1,15 @@
+=== HOST TOOLS ===
+lz4           /opt/homebrew/bin/lz4
+mkfs.erofs    /opt/homebrew/bin/mkfs.erofs
+fsck.erofs    /opt/homebrew/bin/fsck.erofs
+brotli        /opt/homebrew/bin/brotli
+dtc           /opt/homebrew/bin/dtc
+python3       alias python3=python3.11
+zip           /usr/bin/zip
+unzip         /usr/bin/unzip
+=== INPUT ARCHIVES ===
+Permissions Size User Date Modified Name
+.rw-r--r--   41M danb 19 Oct 15:44  /Users/danb/Downloads/ExtremeKRNL-v2.5_g0s_LineageOS-24.0_KSU.zip
+.rw-r--r--@ 1.2G danb 18 Oct 15:31  /Users/danb/Downloads/lineage-24.0-20261011-nightly-g0s-signed.zip
+=== DISK ===
+/dev/disk3s1   228Gi   190Gi   8.8Gi    96%    2.1M   92M    2%   /System/Volumes/Data

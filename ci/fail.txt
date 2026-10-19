@@ -1,0 +1,48 @@
+    1376 ci/fail_raw.txt
+409:build	Build modules	2026-10-19T11:55:33.6365206Z   CC [M]  drivers/gpu/drm/samsung/sgpu/amdgpu_vf_error.o
+1370:build	Build modules	2026-10-19T12:03:25.1195605Z ERROR: modpost: "vclk_debug_init" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+1371:build	Build modules	2026-10-19T12:03:25.1235107Z make[2]: *** [../scripts/Makefile.modpost:168: modules-only.symvers] Error 1
+1373:build	Build modules	2026-10-19T12:03:25.1251739Z make[1]: *** [/home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/Makefile:1882: modules] Error 2
+1375:build	Build modules	2026-10-19T12:03:25.1259552Z make: *** [Makefile:192: __sub-make] Error 2
+1376:build	Build modules	2026-10-19T12:03:25.1281189Z ##[error]Process completed with exit code 2.
+=== TAIL 40 ===
+build	Build modules	2026-10-19T12:03:07.4264558Z   CC [M]  drivers/nfc/nxp/common_ese.o
+build	Build modules	2026-10-19T12:03:08.2738287Z   CC [M]  drivers/battery/common/sb_batt_dump.o
+build	Build modules	2026-10-19T12:03:08.3589000Z   CC [M]  drivers/nfc/nxp/i2c_drv.o
+build	Build modules	2026-10-19T12:03:09.2569700Z   CC [M]  drivers/battery/common/sec_charging_modprobe.o
+build	Build modules	2026-10-19T12:03:09.2723151Z   LD [M]  drivers/nfc/nxp/nfc_sec_nxp.o
+build	Build modules	2026-10-19T12:03:09.2987547Z   CC [M]  drivers/battery/common/sec_battery.o
+build	Build modules	2026-10-19T12:03:09.9592784Z   CC [M]  drivers/battery/wireless/sb_mfc.o
+build	Build modules	2026-10-19T12:03:10.9621198Z   CC [M]  drivers/battery/wireless/s2miw04_charger.o
+build	Build modules	2026-10-19T12:03:12.5083476Z   CC [M]  drivers/battery/common/sec_battery_vote.o
+build	Build modules	2026-10-19T12:03:13.2869125Z   CC [M]  drivers/battery/wireless/p9320_charger.o
+build	Build modules	2026-10-19T12:03:13.3479640Z   CC [M]  drivers/battery/common/sec_battery_thermal.o
+build	Build modules	2026-10-19T12:03:14.2769079Z   CC [M]  drivers/battery/common/sec_battery_sysfs.o
+build	Build modules	2026-10-19T12:03:15.7270442Z   LD [M]  drivers/battery/wireless/sb-mfc.o
+build	Build modules	2026-10-19T12:03:15.7865298Z -- KernelSU-Next Git repo detected at: /home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/KernelSU-Next
+build	Build modules	2026-10-19T12:03:15.7902554Z -- KernelSU-Next version: 33403
+build	Build modules	2026-10-19T12:03:15.7912652Z -- KernelSU-Next tag: v3.4.2
+build	Build modules	2026-10-19T12:03:15.7952460Z -- KernelSU-Next new DCACHE flush: 0
+build	Build modules	2026-10-19T12:03:15.7953186Z -- KernelSU-Next Manager signature size: 0x3e6
+build	Build modules	2026-10-19T12:03:15.7972788Z -- KernelSU-Next Manager signature hash: 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7
+build	Build modules	2026-10-19T12:03:16.0179732Z   CC [M]  drivers/hwmon/hwmon.o
+build	Build modules	2026-10-19T12:03:16.4327985Z   CC [M]  drivers/battery/common/sec_battery_dt.o
+build	Build modules	2026-10-19T12:03:17.4145110Z   CC [M]  drivers/bts/exynos-bts.o
+build	Build modules	2026-10-19T12:03:17.9579390Z   CC [M]  drivers/battery/common/sec_battery_ttf.o
+build	Build modules	2026-10-19T12:03:18.6107079Z   CC [M]  drivers/battery/common/sec_adc.o
+build	Build modules	2026-10-19T12:03:18.7906890Z   CC [M]  drivers/bts/exynos-btsops9925.o
+build	Build modules	2026-10-19T12:03:19.6214449Z   CC [M]  drivers/battery/common/sec_cisd.o
+build	Build modules	2026-10-19T12:03:19.8045953Z   CC [M]  drivers/spu_verify/spu-sign-verify.o
+build	Build modules	2026-10-19T12:03:20.8380468Z   LD [M]  drivers/spu_verify/spu_verify.o
+build	Build modules	2026-10-19T12:03:20.8563101Z   CC [M]  drivers/battery/common/sb_full_soc.o
+build	Build modules	2026-10-19T12:03:21.0230922Z   CC [M]  drivers/battery/common/sec_battery_wc.o
+build	Build modules	2026-10-19T12:03:21.9225435Z   LD [M]  drivers/battery/common/sec-direct-charger.o
+build	Build modules	2026-10-19T12:03:22.2428646Z   LD [M]  drivers/battery/common/sec-battery.o
+build	Build modules	2026-10-19T12:03:24.5655103Z   MODPOST modules-only.symvers
+build	Build modules	2026-10-19T12:03:25.1195605Z ERROR: modpost: "vclk_debug_init" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	Build modules	2026-10-19T12:03:25.1235107Z make[2]: *** [../scripts/Makefile.modpost:168: modules-only.symvers] Error 1
+build	Build modules	2026-10-19T12:03:25.1236121Z make[2]: *** Deleting file 'modules-only.symvers'
+build	Build modules	2026-10-19T12:03:25.1251739Z make[1]: *** [/home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/Makefile:1882: modules] Error 2
+build	Build modules	2026-10-19T12:03:25.1253205Z make[1]: Leaving directory '/home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/out'
+build	Build modules	2026-10-19T12:03:25.1259552Z make: *** [Makefile:192: __sub-make] Error 2
+build	Build modules	2026-10-19T12:03:25.1281189Z ##[error]Process completed with exit code 2.

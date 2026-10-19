@@ -1,0 +1,25 @@
+build	UNKNOWN STEP	2026-10-19T12:50:23.3769306Z   CC [M]  drivers/battery/common/sec_battery_ttf.o
+build	UNKNOWN STEP	2026-10-19T12:50:23.7336012Z   CC [M]  drivers/battery/common/sec_adc.o
+build	UNKNOWN STEP	2026-10-19T12:50:24.0311699Z   CC [M]  drivers/spu_verify/spu-sign-verify.o
+build	UNKNOWN STEP	2026-10-19T12:50:24.7818289Z   CC [M]  drivers/battery/common/sec_cisd.o
+build	UNKNOWN STEP	2026-10-19T12:50:25.0707666Z   LD [M]  drivers/spu_verify/spu_verify.o
+build	UNKNOWN STEP	2026-10-19T12:50:25.0925926Z   CC [M]  drivers/battery/common/sb_full_soc.o
+build	UNKNOWN STEP	2026-10-19T12:50:26.1317305Z   CC [M]  drivers/battery/common/sec_battery_wc.o
+build	UNKNOWN STEP	2026-10-19T12:50:26.1786059Z   LD [M]  drivers/battery/common/sec-direct-charger.o
+build	UNKNOWN STEP	2026-10-19T12:50:27.0431369Z   LD [M]  drivers/battery/common/sec-battery.o
+build	UNKNOWN STEP	2026-10-19T12:50:29.1400067Z   MODPOST modules-only.symvers
+build	UNKNOWN STEP	2026-10-19T12:50:29.6989736Z ERROR: modpost: "vclk_debug_init" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6991125Z ERROR: modpost: "cmucal_dbg_set_cmu_top_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6992530Z ERROR: modpost: "cmucal_dbg_set_cmu_peris_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6993823Z ERROR: modpost: "cmucal_dbg_set_cmu_dsu_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6995356Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl2_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6996680Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl1_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6998012Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl0_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6999585Z ERROR: modpost: "cmucal_dbg_set_cmu_aud_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.7031132Z make[2]: *** [../scripts/Makefile.modpost:168: modules-only.symvers] Error 1
+build	UNKNOWN STEP	2026-10-19T12:50:29.7031977Z make[2]: *** Deleting file 'modules-only.symvers'
+build	UNKNOWN STEP	2026-10-19T12:50:29.7037578Z make[1]: *** [/home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/Makefile:1882: modules] Error 2
+build	UNKNOWN STEP	2026-10-19T12:50:29.7038635Z make[1]: Leaving directory '/home/runner/work/g0s-kernel-build/g0s-kernel-build/kernel/out'
+build	UNKNOWN STEP	2026-10-19T12:50:29.7043841Z make: *** [Makefile:192: __sub-make] Error 2
+build	UNKNOWN STEP	2026-10-19T12:50:29.7064503Z ##[error]Process completed with exit code 2.
+build	UNKNOWN STEP	2026-10-19T12:50:29.7199841Z Cleaning up orphan processes

@@ -1,0 +1,24 @@
+=== build test boot.img ===
+=== rebuilt header ===
+boot magic: ANDROID!
+kernel_size: 28965376
+ramdisk size: 1800761
+os version: 17.0.0
+os patch level: 2026-10
+boot image header version: 4
+command line args: 
+boot.img signature size: 0
+=== original header ===
+boot magic: ANDROID!
+kernel_size: 28965376
+ramdisk size: 1800761
+os version: 17.0.0
+os patch level: 2026-10
+boot image header version: 4
+command line args: 
+boot.img signature size: 0
+=== sizes ===
+.rw-r--r--  31M danb 19 Oct 15:44 work/ek/files/boot.img
+.rw-r--r--  29M danb 19 Oct 17:11 work/test_boot_out/kernel
+.rw-r--r-- 1.8M danb 19 Oct 17:11 work/test_boot_out/ramdisk
+.rw-r--r--  31M danb 19 Oct 17:11 work/test_boot.img

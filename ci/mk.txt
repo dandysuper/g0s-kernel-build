@@ -1,0 +1,97 @@
+=== makefile ===
+#
+# Makefile for the CMUCAL drivers.
+#
+
+# project name 
+ifneq ($(findstring r11,$(PROJECT_NAME)), )
+ccflags-y += -DCONFIG_PROJECT_NAME_R11
+endif
+
+# Object files in subdirectories
+
+obj-$(CONFIG_CAL_IF)			+= cmupmucal.o
+cmupmucal-y				+= cal-if.o cmucal.o ra.o vclk.o pll_spec.o cmucal-debug.o
+cmupmucal-$(CONFIG_PMUCAL)		+= pmucal/pmucal_system.o pmucal/pmucal_local.o pmucal/pmucal_cpu.o pmucal/pmucal_rae.o pmucal/pmucal_powermode.o
+cmupmucal-$(CONFIG_PMUCAL_DBG)		+= pmucal/pmucal_dbg.o
+cmupmucal-$(CONFIG_SOC_S5E9925)		+= s5e9925/cal_data.o
+cmupmucal-$(CONFIG_ACPM_DVFS)		+= acpm_dvfs.o fvmap.o
+cmupmucal-$(CONFIG_EXYNOS_DEBUG_FREQ)        += exynos_debug_freq.o
+
+cmupmucal-$(CONFIG_CP_PMUCAL) += pmucal/pmucal_cp.o
+cmupmucal-$(CONFIG_GNSS_PMUCAL) += pmucal/pmucal_gnss.o
+cmupmucal-$(CONFIG_CHUB_PMUCAL) += pmucal/pmucal_chub.o
+obj-$(CONFIG_CMU_EWF)			+= cmu_ewf.o
+=== vclk.h 115-145 ===
+
+static inline int vclk_register_ops(unsigned int id, struct vclk_trans_ops *ops)
+{
+	return 0;
+}
+
+static inline int vclk_get_bigturbo_table(unsigned int *table)
+{
+	return -EVCLKINVAL;
+}
+#endif
+
+#if defined(CONFIG_CMUCAL_DEBUG) || defined(CONFIG_CMUCAL_DEBUG_MODULE)
+extern unsigned int vclk_debug_clk_get_rate(unsigned int id);
+extern int vclk_debug_clk_set_value(unsigned int id, unsigned int params);
+extern int vclk_debug_init(void);
+extern unsigned long vclk_debug_clk_get_value(unsigned int id);
+#else
+static inline int vclk_debug_init(void)
+{
+	return 0;
+}
+
+static inline unsigned int vclk_debug_clk_get_rate(unsigned int id)
+{
+	return 0;
+}
+
+static inline int vclk_debug_clk_set_value(unsigned int id, unsigned int params)
+{
+	return 0;
+=== cmucal-debug head ===
+#include <linux/debugfs.h>
+#include <linux/uaccess.h>
+#include <linux/io.h>
+#include <linux/module.h>
+#include <soc/samsung/cal-if.h>
+#include <soc/samsung/exynos-pd.h>
+
+#include "cmucal.h"
+#include "vclk.h"
+#include "ra.h"
+
+/***        debugfs support        ***/
+#ifdef CONFIG_DEBUG_FS
+#define MAX_NAME_SIZE	50
+#define INFO_SIZE (SZ_64K)
+
+enum clk_info_type {
+	NONE_INFO,
+	CLK_INFO,
+	BLK_CMU_INFO,
+	TOP_CMU_INFO,
+};
+
+#if defined(CONFIG_CMUCAL_DEBUG)
+static struct dentry *rootdir;
+static unsigned int cmu_aud_base = 0x0;
+static unsigned int cmu_nocl0_base = 0x0;
+static unsigned int cmu_cpucl0_base = 0x0;
+static unsigned int cmu_cpucl1_base = 0x0;
+static unsigned int cmu_cpucl2_base = 0x0;
+static unsigned int cmu_dsu_base = 0x0;
+static unsigned int cmu_peris_base = 0x0;
+#endif
+static unsigned int cmu_top_base = 0x0;
+void __iomem *cmu_aud;
+void __iomem *cmu_nocl0;
+void __iomem *cmu_cpucl0;
+void __iomem *cmu_cpucl1;
+void __iomem *cmu_cpucl2;
+void __iomem *cmu_dsu;

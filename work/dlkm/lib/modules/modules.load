@@ -1,0 +1,5 @@
+sec_debug_coredump
+fingerprint
+fingerprint_sysfs
+input_booster_lkm
+dhd

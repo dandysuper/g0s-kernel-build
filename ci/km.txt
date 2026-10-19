@@ -1,0 +1,11 @@
+=== CMUCAL_DEBUG_MODULE in Kconfig ===
+=== defconfig refs ===
+=== definitions of the 7 cmu base funcs ===
+722:void cmucal_dbg_set_cmu_top_base(u32 base_addr)
+729:void cmucal_dbg_set_cmu_aud_base(u32 base_addr)
+740:void cmucal_dbg_set_cmu_nocl0_base(u32 base_addr)
+751:void cmucal_dbg_set_cmu_cpucl0_base(u32 base_addr)
+762:void cmucal_dbg_set_cmu_cpucl1_base(u32 base_addr)
+773:void cmucal_dbg_set_cmu_cpucl2_base(u32 base_addr)
+784:void cmucal_dbg_set_cmu_dsu_base(u32 base_addr)
+795:void cmucal_dbg_set_cmu_peris_base(u32 base_addr)

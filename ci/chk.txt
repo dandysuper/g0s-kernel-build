@@ -1,0 +1,14 @@
+=== lz4 roundtrip tail ===
+=== cpio + lz4 legacy roundtrip ===
+Read : 0 MiB   ==> inf%   Read : 40 MiB   ==> 30.93%   Read : 56 MiB   ==> 26.12%                                                                                  Compressed 59206656 bytes into 15339906 bytes ==> 25.91% 
+     319
+.rw-r--r-- 15M danb 19 Oct 17:12 work/test_vr1.lz4
+.rw-r--r-- 15M danb 19 Oct 16:27 work/vboot/vendor_ramdisk01
+=== counts ===
+vr1 source modules:      319
+after cpio+lz4 roundtrip:      319
+=== sizes ===
+.rw-r--r-- 15M danb 19 Oct 17:12 work/test_vr1.lz4
+.rw-r--r-- 15M danb 19 Oct 16:27 work/vboot/vendor_ramdisk01
+=== CI 39250030918 ===
+{"c":"","s":"in_progress","steps":[{"c":"success","n":"Set up job","s":"completed"},{"c":"success","n":"Checkout kernel source","s":"completed"},{"c":"success","n":"Install build dependencies","s":"completed"},{"c":"","n":"Fetch clang toolchain","s":"in_progress"}]}

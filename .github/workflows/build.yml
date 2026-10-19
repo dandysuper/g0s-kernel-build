@@ -72,18 +72,29 @@ jobs:
           scripts/kconfig/merge_config.sh -m -O out \
             out/.config arch/arm64/configs/g0s.config
 
-          # KernelSU and DEBUG_FS must be enabled explicitly.
+          # KernelSU on, CMUCAL debug off.
           #
-          # DEBUG_FS is not optional here. In drivers/soc/samsung/cal-if:
-          #   cmucal-debug.c  defines and EXPORT_SYMBOL_GPL(vclk_debug_init)
-          #                   only inside "#ifdef CONFIG_DEBUG_FS"
-          #   vclk.h          declares it "extern" whenever CONFIG_CMUCAL_DEBUG
-          #                   is set, and CMUCAL_DEBUG is "tristate ... default y"
-          # So with DEBUG_FS off the symbol is declared but never defined, and
-          # modpost fails the module set with:
-          #   "vclk_debug_init" [..../cmupmucal.ko] undefined!
+          # drivers/soc/samsung/cal-if has a guard mismatch between the header
+          # and the implementation:
+          #   cmucal.h        declares cmucal_dbg_set_cmu_*_base() and
+          #                   vclk_debug_init() extern when
+          #                   CONFIG_DEBUG_FS && CONFIG_CMUCAL_DEBUG
+          #   vclk.h          declares vclk_debug_init() extern when
+          #                   CONFIG_CMUCAL_DEBUG
+          #   cmucal-debug.c  DEFINES all of them only inside
+          #                   CONFIG_DEBUG_FS && CONFIG_CMUCAL_DEBUG
+          # CMUCAL_DEBUG is "tristate ... default y", so the externs appear while
+          # the definitions do not land in cmupmucal.ko, and modpost dies with:
+          #   "vclk_debug_init"             [..../cmupmucal.ko] undefined!
+          #   "cmucal_dbg_set_cmu_top_base" [..../cmupmucal.ko] undefined!
+          # With CMUCAL_DEBUG off every one of those declarations becomes a
+          # static inline stub, so the module carries no external debug symbols
+          # at all and links cleanly. The only loss is the debugfs clock tree.
+          # DEBUG_FS itself stays on - it is standard and other subsystems use it.
           scripts/config --file out/.config --enable KSU
           scripts/config --file out/.config --enable DEBUG_FS
+          scripts/config --file out/.config --disable CMUCAL_DEBUG
+          scripts/config --file out/.config --disable CMUCAL_DEBUG_MODULE
 
           make -j$(nproc) O=out olddefconfig
 
@@ -96,7 +107,10 @@ jobs:
           grep -q "^CONFIG_BCMDHD_PCIE=y"    out/.config || { echo "FATAL: CONFIG_BCMDHD_PCIE=y missing"; exit 1; }
           grep -q "^CONFIG_BT_BCM43XX=m"     out/.config || { echo "FATAL: CONFIG_BT_BCM43XX=m missing"; exit 1; }
           grep -q "^CONFIG_KSU=y"            out/.config || { echo "FATAL: CONFIG_KSU=y missing"; exit 1; }
-          grep -q "^CONFIG_DEBUG_FS=y"       out/.config || { echo "FATAL: CONFIG_DEBUG_FS=y missing - vclk_debug_init will be undefined"; exit 1; }
+          grep -q "^CONFIG_DEBUG_FS=y"       out/.config || { echo "FATAL: CONFIG_DEBUG_FS=y missing"; exit 1; }
+          if grep -qE "^CONFIG_CMUCAL_DEBUG(=y|=m)" out/.config; then
+            echo "FATAL: CMUCAL_DEBUG is on - cmucal_dbg_* / vclk_debug_init will be undefined"; exit 1
+          fi
           if grep -q "^CONFIG_R11S_WIRELESS=y" out/.config; then
             echo "FATAL: r11s wireless enabled on a g0s build"; exit 1
           fi

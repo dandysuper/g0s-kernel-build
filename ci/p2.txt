@@ -1,0 +1,5 @@
+To https://github.com/dandysuper/g0s-kernel-build.git
+   5bb7ac6..bdafc75  HEAD -> master
+https://github.com/dandysuper/g0s-kernel-build/actions/runs/39250030918
+in_progress		Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	master	workflow_dispatch	39250030918	13s	2026-10-19T12:10:45Z
+completed	failure	Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)	master	workflow_dispatch	39244401776	39m2s	2026-10-19T11:24:26Z

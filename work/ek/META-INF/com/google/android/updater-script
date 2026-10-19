@@ -1,0 +1,25 @@
+ui_print(" ");
+ui_print("====================================");
+ui_print(" Installing ExtremeKRNL for LineageOS");
+ui_print(" Target: Samsung Galaxy S22+ (g0s)");
+ui_print(" Linux 5.10.269 + KernelSU");
+ui_print("====================================");
+ui_print(" ");
+
+ui_print("Flashing boot image...");
+package_extract_file("files/boot.img", "/dev/block/by-name/boot");
+
+ui_print("Flashing vendor_boot image...");
+package_extract_file("files/vendor_boot.img", "/dev/block/by-name/vendor_boot");
+
+ui_print("Flashing dtbo image...");
+package_extract_file("files/dtbo.img", "/dev/block/by-name/dtbo");
+
+ui_print("Flashing vendor_dlkm partition...");
+package_extract_file("files/vendor_dlkm.img", map_partition("vendor_dlkm"));
+unmap_partition("vendor_dlkm");
+
+ui_print(" ");
+ui_print("Installation successful!");
+ui_print("Enjoy ExtremeKRNL on LineageOS!");
+ui_print(" ");

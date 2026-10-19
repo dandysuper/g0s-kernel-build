@@ -1,0 +1,11 @@
+build	UNKNOWN STEP	2026-10-19T12:12:40.1666177Z [36;1m#   "vclk_debug_init" [..../cmupmucal.ko] undefined![0m
+build	UNKNOWN STEP	2026-10-19T12:12:40.1679701Z [36;1mgrep -q "^CONFIG_DEBUG_FS=y"       out/.config || { echo "FATAL: CONFIG_DEBUG_FS=y missing - vclk_debug_init will be undefined"; exit 1; }[0m
+build	UNKNOWN STEP	2026-10-19T12:12:47.3422775Z   Module for testing for undefined behavior detection (TEST_UBSAN) [N/m/?] n
+build	UNKNOWN STEP	2026-10-19T12:50:29.6989736Z ERROR: modpost: "vclk_debug_init" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6991125Z ERROR: modpost: "cmucal_dbg_set_cmu_top_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6992530Z ERROR: modpost: "cmucal_dbg_set_cmu_peris_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6993823Z ERROR: modpost: "cmucal_dbg_set_cmu_dsu_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6995356Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl2_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6996680Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl1_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6998012Z ERROR: modpost: "cmucal_dbg_set_cmu_cpucl0_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
+build	UNKNOWN STEP	2026-10-19T12:50:29.6999585Z ERROR: modpost: "cmucal_dbg_set_cmu_aud_base" [drivers/soc/samsung/cal-if/cmupmucal.ko] undefined!
