@@ -121,15 +121,22 @@ jobs:
 
           # A choice symbol can be silently overridden by olddefconfig, and a
           # silent fall back to LTO_NONE costs a full ~90-minute build and
-          # produces modules that do not fit. Fail here instead.
-          grep -q "^CONFIG_LTO_CLANG_THIN=y" out/.config || {
+          # produces modules that do not fit. Dump the whole size-relevant flag
+          # set when that happens so the cause is visible instead of guessed.
+          if ! grep -q "^CONFIG_LTO_CLANG_THIN=y" out/.config; then
             echo "FATAL: ThinLTO did not stick - modules will not fit vendor_dlkm"
-            grep -E "^CONFIG_LTO" out/.config || true
+            echo "--- LTO / toolchain probe ---"
+            grep -E "^CONFIG_(LTO|LD_IS_LLD|CC_IS_CLANG|CLANG_VERSION|LLD_VERSION|LLVM_IAS)" out/.config || echo "(none present)"
+            echo "--- size-relevant flags ---"
+            grep -E "^CONFIG_(CC_OPTIMIZE|CC_HAS|DEBUG_INFO|RANDSTRUCT|CFI_CLANG|KASAN|GCOV|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|KPROBES|TRACEPOINTS|MODULE_SIG|MODVERSIONS|JUMP_LABEL|STACKPROTECTOR|FORTIFY|INIT_ON)" out/.config | sort || echo "(none present)"
+            echo "--- does the tree even define the choice? ---"
+            grep -rn -A3 'prompt "Link Time Optimization"' init/Kconfig 2>/dev/null || echo "(no LTO choice in init/Kconfig)"
+            grep -n "config LTO_CLANG" init/Kconfig 2>/dev/null || echo "(no LTO_CLANG symbol)"
+            echo "--- what LD does kconfig see? ---"
+            "${CROSS_COMPILE}ld" --version 2>/dev/null | head -2 || true
+            ld.lld --version 2>/dev/null | head -2 || true
             exit 1
-          }
-          grep -q "^CONFIG_LD_IS_LLD=y" out/.config || {
-            echo "FATAL: LTO_CLANG_THIN requires CONFIG_LD_IS_LLD=y"; exit 1
-          }
+          fi
           echo "ThinLTO confirmed: $(grep -E '^CONFIG_LTO_CLANG_THIN=y' out/.config)"
 
           echo "================ FINAL CONFIG (critical symbols) ================"
