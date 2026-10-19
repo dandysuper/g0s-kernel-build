@@ -60,18 +60,16 @@ jobs:
           export SUBARCH=arm64
           export PATH="$PWD/../clang-prebuilt/bin:$PATH"
 
-          make -j$(nproc) \
-            O=out \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            s5e9925_defconfig
+          # Every kconfig invocation needs the toolchain variables, not just the
+          # defconfig call. CONFIG_LTO_CLANG_THIN lives behind a choice that
+          # requires CONFIG_CC_IS_CLANG and CONFIG_LLD_VERSION, and those are
+          # probed from CC/LD at configure time. Running olddefconfig bare made
+          # the tree probe the host gcc/ld, conclude LTO_CLANG was unavailable,
+          # and silently force CONFIG_LTO_NONE - which then inflated the Image
+          # and every module by 1.84x.
+          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+
+          make -j$(nproc) $MAKE_ARGS s5e9925_defconfig
 
           scripts/kconfig/merge_config.sh -m -O out \
             out/.config arch/arm64/configs/g0s.config
@@ -119,7 +117,7 @@ jobs:
           scripts/config --file out/.config --enable LTO_CLANG_THIN
           scripts/config --file out/.config --enable LD_IS_LLD
 
-          make -j$(nproc) O=out olddefconfig
+          make -j$(nproc) $MAKE_ARGS olddefconfig
 
           # A choice symbol can be silently overridden by olddefconfig, and a
           # silent fall back to LTO_NONE costs a full ~90-minute build and
