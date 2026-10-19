@@ -198,23 +198,27 @@ jobs:
         run: |
           set -e
           TAG="build-$(date -u +%Y%m%d-%H%M)"
+          NOTES="$PWD/artifact/release-notes.md"
+          {
+            echo "LineageOS 24.0 / Android 17 kernel for g0s (Galaxy S22)."
+            echo ""
+            echo "- kernel: $VERSION"
+            echo "- KernelSU Next: enabled"
+            echo "- BCM4389 Wi-Fi (BCMDHD_PCIE) + BCM BT (BCM43XX): enabled"
+            echo "- r11s wireless: rejected by config gate"
+            echo "- CONFIG_CMUCAL_DEBUG disabled: fix for the cmupmucal.ko"
+            echo "  undefined cmucal_dbg_set_cmu_*_base / vclk_debug_init symbols"
+            echo ""
+            echo "Assets:"
+            echo "- Image: raw arm64 kernel"
+            echo "- modules.tar.gz: lib/modules tree from modules_install"
+          } > "$NOTES"
           echo "Published tag: $TAG"
           gh release create "$TAG" \
             artifact/Image \
             artifact/modules.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
             --title "g0s kernel $TAG" \
-            --notes "LineageOS 24.0 / Android 17 kernel for g0s (Galaxy S22).
-
-- kernel: \`$VERSION\`
-- KernelSU Next: enabled
-- BCM4389 Wi-Fi (\`CONFIG_BCMDHD_PCIE\`) + BCM BT (\`CONFIG_BT_BCM43XX\`): enabled
-- r11s wireless: rejected by gate
-- \`CONFIG_CMUCAL_DEBUG\` disabled — this is the fix for
-  \`modpost: \"cmucal_dbg_set_cmu_*_base\" [cmupmucal.ko] undefined!\`
-
-Assets:
-- \`Image\` — raw arm64 kernel
-- \`modules.tar.gz\` — lib/modules tree from modules_install"
+            --notes-file "$NOTES"
         env:
           GH_TOKEN: ${{ github.token }}
