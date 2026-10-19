@@ -216,7 +216,8 @@ Hard gates, all fail-fast:
 
 ### Commits on `master` (newest first)
 ```
-<pending>  fix size root cause: disable KASAN and DEBUG_INFO (1.84x bloat); tree has no LTO support at all
+fbc9cbb     docs: handoff with root cause (KASAN + DEBUG_INFO, not LTO) and current build state
+be395ab     fix size root cause: disable KASAN and DEBUG_INFO (1.84x bloat); tree has no LTO support at all
 224fc1b     diagnose: dump size-relevant flags and LTO Kconfig presence when ThinLTO is unavailable
 ab029e5     pass toolchain vars to olddefconfig so CC_IS_CLANG/LLD_VERSION probe works and ThinLTO can be selected
 5fb8ea1     enable ThinLTO: LTO_NONE inflated Image and every module by 1.84x, modules cannot fit vendor_dlkm
