@@ -9,6 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 240
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout kernel source
@@ -135,23 +137,46 @@ jobs:
           MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
           make -j$(nproc) $MAKE_ARGS modules
           rm -rf ../modules_out
-          make -j$(nproc) $MAKE_ARGS INSTALL_MOD_PATH="$PWD/../modules_out" modules_install
-          find ../modules_out -name '*.ko' | wc -l
+          # INSTALL_MOD_STRIP=1 makes the kernel build run ${CROSS_COMPILE}strip
+          # --strip-debug on every .ko as it installs. Modules straight out of
+          # the build carry full DWARF and the tree comes to ~127 MB, which can
+          # never fit the 19,685,376-byte vendor_dlkm partition; stripped it
+          # lands in the same neighbourhood as the stock module set.
+          make -j$(nproc) $MAKE_ARGS \
+            INSTALL_MOD_PATH="$PWD/../modules_out" \
+            INSTALL_MOD_STRIP=1 \
+            modules_install
+          echo "modules: $(find ../modules_out -name '*.ko' | wc -l)"
+          echo "bytes:   $(find ../modules_out -name '*.ko' -printf '%s\n' | awk '{s+=$1} END {print s}')"
 
-      - name: Verify vermagic matches what the ROM expects
+      - name: Verify vermagic and required modules
         run: |
           set -e
           cd kernel
-          KVER=$(make kernelversion)
-          echo "kernelversion: $KVER"
-          echo "--- kernel vermagic ---"
-          strings out/arch/arm64/boot/Image | grep -E "^[0-9]+\.[0-9]+\.[0-9]+.*SMP preempt" | head -3 || true
-          echo "--- sample module vermagic ---"
+          echo "kernelversion: $(make kernelversion)"
+
+          # The kernel and every module must agree exactly, or the ROM refuses to
+          # load the module set at boot and the device comes up with no Wi-Fi.
+          KVM=$(strings out/arch/arm64/boot/Image | grep -m1 -E "^5\.10\.[0-9]+")
           SAMPLE=$(find ../modules_out -name '*.ko' | head -1)
-          echo "sample: $SAMPLE"
-          strings "$SAMPLE" | grep -E "vermagic=" | head -3 || true
-          echo "--- dhd.ko / bcm present? ---"
-          find ../modules_out -name 'dhd.ko' -o -name 'bcm*.ko' | head -10
+          MVM=$(strings "$SAMPLE" | sed -n 's/^vermagic=//p' | head -1)
+          echo "kernel vermagic : $KVM"
+          echo "module vermagic : $MVM   ($SAMPLE)"
+
+          [ -n "$KVM" ] || { echo "FATAL: no vermagic in Image"; exit 1; }
+          [ -n "$MVM" ] || { echo "FATAL: no vermagic in $SAMPLE"; exit 1; }
+          if [ "$KVM" != "$MVM" ]; then
+            echo "FATAL: vermagic mismatch - kernel vs module"; exit 1
+          fi
+          echo "vermagic OK - duplicates would not be possible from one build tree"
+
+          for m in dhd.ko cfg80211.ko bcm43xx.ko; do
+            path=$(find ../modules_out -name "$m" | head -1)
+            if [ -z "$path" ]; then
+              echo "FATAL: required module $m missing from the build"; exit 1
+            fi
+            echo "present: $m  ($(stat -c%s "$path") bytes)"
+          done
 
       - name: Package artifacts
         run: |
@@ -164,16 +189,32 @@ jobs:
           ls -lh
           echo "$(date -u +%Y%m%d-%H%M)" > build-stamp.txt
 
-      - name: Upload Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-Image
-          path: artifact/Image
-          retention-days: 30
+      # Artifact storage is quota-limited account-wide and that quota is spent,
+      # so upload-artifact fails with "Artifact storage quota has been hit".
+      # Release assets are metered separately, so the build publishes itself as
+      # a release instead. Tag carries the build timestamp so every build lands
+      # without clobbering the previous one.
+      - name: Publish build as a release
+        run: |
+          set -e
+          TAG="build-$(date -u +%Y%m%d-%H%M)"
+          echo "Published tag: $TAG"
+          gh release create "$TAG" \
+            artifact/Image \
+            artifact/modules.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "g0s kernel $TAG" \
+            --notes "LineageOS 24.0 / Android 17 kernel for g0s (Galaxy S22).
 
-      - name: Upload modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-modules
-          path: artifact/modules.tar.gz
-          retention-days: 30
+- kernel: \`$VERSION\`
+- KernelSU Next: enabled
+- BCM4389 Wi-Fi (\`CONFIG_BCMDHD_PCIE\`) + BCM BT (\`CONFIG_BT_BCM43XX\`): enabled
+- r11s wireless: rejected by gate
+- \`CONFIG_CMUCAL_DEBUG\` disabled — this is the fix for
+  \`modpost: \"cmucal_dbg_set_cmu_*_base\" [cmupmucal.ko] undefined!\`
+
+Assets:
+- \`Image\` — raw arm64 kernel
+- \`modules.tar.gz\` — lib/modules tree from modules_install"
+        env:
+          GH_TOKEN: ${{ github.token }}

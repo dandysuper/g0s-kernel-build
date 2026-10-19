@@ -64,6 +64,37 @@ def module_vermagic(ko_path):
     return m.group(1).strip() if m else None
 
 
+def strip_modules(module_dir):
+    """Strip debug info from every .ko so the set fits the vendor_dlkm partition.
+
+    A module tree straight out of the build carries full DWARF and runs to over
+    100 MB, which can never fit 19,685,376 bytes. llvm-strip / cross binutils
+    --strip-debug removes only DWARF and leaves .symtab alone, so module loading
+    and vermagic are unaffected. macOS /usr/bin/strip speaks Mach-O and is
+    deliberately not used here.
+    """
+    tool = None
+    for cand in ("llvm-strip", "aarch64-linux-gnu-strip", "aarch64-linux-gnu-objcopy"):
+        if shutil.which(cand):
+            tool = cand
+            break
+    if tool is None:
+        print("  ! no ELF-capable strip found (llvm-strip / aarch64-linux-gnu-*)")
+        print("  ! leaving modules unstripped - the EROFS build will likely overflow")
+        return
+
+    before = after = 0
+    for f in sorted(os.listdir(module_dir)):
+        if not f.endswith(".ko"):
+            continue
+        p = os.path.join(module_dir, f)
+        before += os.path.getsize(p)
+        subprocess.run([tool, "--strip-debug", p], check=True)
+        after += os.path.getsize(p)
+    saved = before - after
+    print(f"  {tool}: {before} -> {after} bytes (freed {saved})")
+
+
 def flatten_modules(modules_src, dest):
     """Copy every .ko into a flat lib/modules tree, like the stock images use."""
     os.makedirs(dest, exist_ok=True)
@@ -291,6 +322,15 @@ def main():
     shutil.rmtree(flat, ignore_errors=True)
     n = flatten_modules(args.modules, flat)
     print(f"  {n} modules")
+
+    print("== 1b. strip debug info ==")
+    strip_modules(flat)
+    total = sum(
+        os.path.getsize(os.path.join(flat, f))
+        for f in os.listdir(flat)
+        if f.endswith(".ko")
+    )
+    print(f"  {total} bytes of modules vs {VENDOR_DLKM_SIZE} partition")
 
     print("== 2. modules.dep ==")
     src_dep = None
