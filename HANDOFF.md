@@ -1,7 +1,7 @@
 # Handoff — g0s (Galaxy S22+) LineageOS 24.0 kernel: Wi-Fi fix via source rebuild
 
-**Last updated:** 2026-10-19 23:53 (Asia/Almaty)
-**Read this whole file before touching anything.** §1 is the state, §3 is the blocker, **§5 contains the root cause that was just found**, §6 is the fix that is currently building.
+**Last updated:** 2026-10-20 06:52 (Asia/Almaty)
+**Read this whole file before touching anything.** §1 is the state (build done, zip ready), §3 is the size arithmetic, **§5 is the root cause**, §6 is the fix that worked, §7 is the repack/flash procedure.
 
 ---
 
@@ -9,15 +9,26 @@
 
 Goal: rebuild the kernel from source so BCM4389 **Wi-Fi + Bluetooth** work on LineageOS 24.0 (Android 17) on `g0s` (SM-S906B, Exynos 2200).
 
-Status right now:
+**STATUS: BUILD COMPLETE — FLASHABLE ZIP IS READY. Nothing is blocked.**
 
-- ✅ **The kernel builds end to end in CI.** Image and all 320 modules compile and link. The two original blockers (the `cmupmucal.ko` undefined-symbol link failure, and the `r11s`-instead-of-`g0s` Wi-Fi config) are both fixed and gated.
-- ✅ `boot.img` and `vendor_boot.img` have already been produced locally and are correct.
-- ❗ **The one remaining blocker:** the module set was 113,854,768 bytes against a fixed 19,685,376-byte `vendor_dlkm` partition — it could not be flashed.
-- ✅ **Root cause found and fixed in the workflow.** It was **not** LTO. `CONFIG_KASAN=y` (+ `KASAN_HW_TAGS`) and `CONFIG_DEBUG_INFO=y` were enabled in the merged config, inflating the Image and every module by ~1.84×. Both are now disabled with hard gates.
-- 🔄 **Build `39306330781` is running with that fix.** Whoever picks this up should read its result first.
+```
+~/Downloads/ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip   45,042,643 bytes
+```
 
-If that build's module total comes in around **59 MB** (stock is 58,998,976), the fix worked and the project moves straight to repack + flash.
+- ✅ Kernel builds end to end in CI (run `39306330781`, all steps success).
+- ✅ **Size blocker solved.** Root cause was **not** LTO — it was `CONFIG_KASAN=y` (+ `KASAN_HW_TAGS`) and `CONFIG_DEBUG_INFO=y` in the merged config. Disabling both dropped the module set from 113,854,768 → **56,524,808 bytes** (below stock's 58,998,976) and the Image from 53,348,864 → **32,733,696** (stock 28,965,376).
+- ✅ **`vendor_dlkm` now fits:** EROFS lz4hc,12 = 18,989,056 bytes, padded to exactly **19,685,376** (stock was 19,079,168 — same ~1 MB headroom).
+- ✅ All four images built, verified, and packaged (see §7).
+
+**Next action is on the device, not in this repo:** flash and confirm Wi-Fi + BT come up.
+
+```
+out/boot.img          34,541,568
+out/vendor_boot.img   17,162,240
+out/vendor_dlkm.img   19,685,376  (exact partition size)
+```
+- [ ] Flash all four images together, boot, check Wi-Fi/BT
+- [ ] If Wi-Fi still dead, the remaining suspect is `CONFIG_BCMDHD_PCIE` firmware path, not the config gates (they pass)
 
 ---
 
@@ -137,7 +148,9 @@ Dead ends already ruled out with evidence — **do not re-test these**:
 
 ---
 
-## 6. The fix that is currently building (run `39306330781`)
+## 6. The fix that worked (run `39306330781`, success)
+
+Result: modules **56,524,808** bytes (stock 58,998,976), Image **32,733,696** (stock 28,965,376). `vendor_dlkm.img` = 18,989,056 compressed, padded to 19,685,376. Confirmed by repack.
 
 In the `Configure` step of `.github/workflows/build.yml`, the dead LTO block was replaced with:
 
@@ -251,4 +264,8 @@ e59b85e     fix: vermagic gate compares prefix not equality (module = release + 
 
 ## 10. One-paragraph summary for a fresh agent
 
-The kernel builds and `boot.img`/`vendor_boot.img` are already correct; the only thing that stopped flashing was the module set being 113.8 MB against a fixed 19.6 MB `vendor_dlkm` partition. The cause was **`CONFIG_KASAN=y` (+ `KASAN_HW_TAGS`) and `CONFIG_DEBUG_INFO=y`** in the merged config — KASAN inflates code ~1.8× and redzones every global (hence the 10× `.data`), and DEBUG_INFO adds full DWARF; LTO was a red herring because this Samsung 5.10 tree has no LTO Kconfig at all. The workflow now disables all of that with fail-fast gates, and build `39306330781` is exercising the fix — read its `bytes:` line in the "Build modules" step: ~59 MB means success, then run `repack.py` (§7), confirm `vendor_dlkm.img` is exactly 19,685,376 bytes, and flash all four images together. Everything about boot, encryption, Bluetooth module ordering, the `r11s`→`g0s` Wi-Fi config fix, and the `CMUCAL_DEBUG` link fix is already done and must not be undone.
+**The work is done — a flashable zip is sitting in `~/Downloads/ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip` (45,042,643 bytes) and the only thing left is flashing it on the device.**
+
+The size blocker is solved. The module set was 113.8 MB against a fixed 19.6 MB `vendor_dlkm` partition; the cause was **`CONFIG_KASAN=y` (+ `KASAN_HW_TAGS`) and `CONFIG_DEBUG_INFO=y`** in the merged config — KASAN inflates code ~1.8× and redzones every global (the 10× `.data`), and DEBUG_INFO adds full DWARF. LTO was a red herring: this Samsung 5.10 tree has no LTO Kconfig at all. Disabling those dropped modules to **56,524,808 bytes** (below stock's 58,998,976) and the Image to **32,733,696** (stock 28,965,376), so `vendor_dlkm.img` compresses to 18,989,056 and pads to exactly 19,685,376. Build `39306330781` is green and `repack.py` confirmed all four images.
+
+**If you are picking this up: flash `boot` + `vendor_boot` + `dtbo` + `vendor_dlkm` together and report whether Wi-Fi and Bluetooth come up.** Everything about boot, encryption, Bluetooth module ordering, the `r11s`→`g0s` Wi-Fi config fix, and the `CMUCAL_DEBUG` link fix is already done and must not be undone. If Wi-Fi is still dead after flashing, the config gates all pass, so the next suspect is the BCMDHD firmware path under `/vendor` rather than anything in this build system.
