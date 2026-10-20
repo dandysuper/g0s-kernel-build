@@ -1,0 +1,109 @@
+# Samsung Galaxy S22+ (g0s / SM-S906B) — LineageOS 24.0 Hardware & Kernel Fixes
+
+**Date:** 2026-10-20  
+**Target Device:** Samsung Galaxy S22+ (Exynos 2200 / `s5e9925`, codename `g0s`, model `SM-S906B`)  
+**Operating System:** LineageOS 24.0 (Android 17 / SDK 37)  
+**Kernel:** Linux 5.10.260-g0d060df61c11-dirty (ExtremeKRNL source rebuild with KernelSU Next)
+
+---
+
+## 1. Summary of Issues & Root Causes
+
+### Issue 1: Wi-Fi (`wlan0`) completely broken
+- **Root Cause A (Kernel Binary):** The prebuilt `ExtremeKRNL-v2.5` AOSP release was compiled with `CONFIG_R11S_WIRELESS=y` (the Galaxy S23 FE config) instead of `CONFIG_BCM4389=m` + `CONFIG_BCMDHD_PCIE=y`. As a result, the Broadcom PCIe bus glue was compiled out, leaving the kernel physically unable to communicate with the S22+'s BCM4389 Wi-Fi chip.
+- **Root Cause B (Vermagic Mismatch):** When flashing prebuilt kernel packages, the kernel vermagic was `5.10.269-ExtremeKRNL-v2.5+`, but the dynamic `/vendor_dlkm` partition still contained stock LineageOS modules compiled for `5.10.260-gd52006865213`. Second-stage init (`wifi_brcm.rc`) executes `modprobe -d /vendor/lib/modules dhd.ko`, which failed with `Exec format error` / vermagic mismatch.
+- **Root Cause C (First-Stage Ramdisk Failure):** Broadcom `dhd.ko` cannot be initialized in first-stage init (`vendor_boot` ramdisk) before `/vendor` is mounted, because `dhd.ko` calls `request_firmware()` for `bcmdhd_sta.bin` during device probe. Attempting to probe it in early ramdisk triggers a kernel panic / watchdog reboot (bootloop).
+
+### Issue 2: Fingerprint Sensor ("Something went wrong" / No enrollment prompt)
+- **Hardware Architecture:** The S22+ uses a Qualcomm 3D Sonic ultrasonic under-display sensor (`qbt2000` / chipid `QBT2608`).
+- **Root Cause A (Dropped Drivers in v2.zip):** In `g0s-fix-wifi-bt-fingerprint-v2.zip`, `fingerprint.ko` and `fingerprint_sysfs.ko` were deleted from `modules.load`, and second-stage loading from `/vendor_dlkm` failed due to the vermagic mismatch described above.
+- **Root Cause B (Device Permissions):** When `qbt2000_spidev.ko` is loaded after `on boot`, the character devices `/dev/qbt2000_fd` and `/dev/qbt2000_ipc` were created with default `0600 root:root` permissions. The biometric HAL daemon (`android.hardware.biometrics.fingerprint-service.samsung`, running as UID 1000 `system`) could not open `/dev/qbt2000_fd`, resulting in `BIOMETRIC_ERROR_HW_UNAVAILABLE (Status 7)`.
+- **Root Cause C (Touchscreen FOD Disabled):** The Samsung touchscreen controller (`stm_ts_spi`) had its Fingerprint-On-Display (FOD) event routing disabled (`fod:0`). The screen did not send touch/pressure coordinates to the ultrasonic reader.
+- **Root Cause D (Missing Template Directory):** The biometric directory `/data/vendor/biometrics/fp/User_0` did not exist on fresh ROM installations, causing template creation in `bauth_FPBAuthServiceStorage` to fail with `fopen is null: 2`.
+- **Root Cause E (Sysfs Node Ownership):** `/sys/class/fingerprint/fingerprint/*` nodes were owned by `root:root` instead of `system:radio`.
+
+---
+
+## 2. Implemented Fixes
+
+### A. Kernel Source Rebuild (CI)
+Rebuilt the kernel from source specifically for `g0s` under LineageOS 24.0 (`build.yml` run `39306330781`):
+- Hard-gated configuration:
+  - `CONFIG_BCM4389=m`
+  - `CONFIG_BCMDHD_PCIE=y`
+  - `CONFIG_BT_BCM43XX=m`
+  - `CONFIG_KSU=y` (KernelSU Next `next` branch)
+  - `CONFIG_R11S_WIRELESS=n`
+  - `CONFIG_CMUCAL_DEBUG=n` (resolved `cmupmucal.ko` link failures)
+  - `CONFIG_KASAN=n` & `CONFIG_DEBUG_INFO=n` (resolved 1.84× code bloat so modules fit the 19.6 MB `vendor_dlkm` partition).
+- Generated partition images with uniform vermagic `5.10.260-g0d060df61c11-dirty`:
+  - `boot.img`
+  - `vendor_boot.img`
+  - `dtbo.img`
+  - `vendor_dlkm.img`
+
+### B. Partition Flashing Protocol
+Dynamic partitions (`vendor_dlkm`) inside the `super` container cannot be flashed by standard sideload zips without OTA metadata. All four partitions were flashed cleanly via **fastbootd** (Lineage Recovery → Advanced → Enter fastboot):
+```bash
+fastboot flash boot boot.img
+fastboot flash vendor_boot vendor_boot.img
+fastboot flash dtbo dtbo.img
+fastboot flash vendor_dlkm vendor_dlkm.img
+```
+
+### C. Driver Loading & Hardware Permissions
+To prevent first-stage init ramdisk kernel panics while ensuring drivers are ready before the user interacts with Android, drivers and hardware permissions are loaded safely via late-stage boot.
+
+The startup script was installed to `/data/adb/service.d/load_drivers.sh` (and mirrored to `/data/adb/post-fs-data.d/load_drivers.sh`):
+
+```bash
+#!/system/bin/sh
+
+# 1. Load Broadcom PCIe Wi-Fi driver
+modprobe -d /vendor_dlkm/lib/modules dhd
+
+# 2. Load Qualcomm 3D Sonic Fingerprint sensor drivers
+modprobe -d /vendor_dlkm/lib/modules fingerprint_sysfs
+modprobe -d /vendor_dlkm/lib/modules fingerprint
+
+# 3. Ensure device permissions for biometric HAL
+chown system:system /dev/qbt2000*
+chmod 0660 /dev/qbt2000*
+
+# 4. Enable Touchscreen FOD (Fingerprint on Display) mode
+echo "fod_enable,1" > /sys/class/sec/tsp/cmd
+
+# 5. Fix sysfs fingerprint node permissions
+chown system:radio /sys/class/fingerprint/fingerprint/*
+
+# 6. Ensure biometrics template directories exist
+mkdir -p /data/vendor/biometrics/fp/User_0
+chown -R system:system /data/vendor/biometrics
+chmod -R 0770 /data/vendor/biometrics
+
+# 7. Restart HALs to bind newly initialized hardware
+pkill -f android.hardware.wifi-service
+pkill -f android.hardware.biometrics.fingerprint
+```
+Permissions: `chmod 0755 /data/adb/service.d/load_drivers.sh`
+
+### D. Root Management
+- Installed official **KernelSU Next v3.4.2** manager (`com.rifsxd.ksunext`).
+- KernelSU daemon (`ksud`) initialized under `/data/adb/ksud`.
+- Root granted to UID 10228 (Manager).
+
+---
+
+## 3. Verification & Results
+
+| Subsystem | Test / Verification Command | Result |
+|---|---|---|
+| **Wi-Fi Link** | `cmd wifi status` | **Connected** to `Beeline_5G_9285` (866 Mbps, RSSI -41 dBm, IP `192.168.0.11`) |
+| **Wi-Fi Packets** | `cmd wifi status` (Rx/Tx) | 234k+ Tx, 1.29M+ Rx packets flowing |
+| **Bluetooth** | `lsmod \| grep bcm43xx` | `bcm43xx.ko` active, rfkill operational |
+| **Fingerprint HAL** | `ps -A \| grep fingerprint` | `android.hardware.biometrics.fingerprint-service.samsung` in `binder_wait_for_work` |
+| **TrustZone TEE** | Logcat `tlc_communicate` | `0x00000000 TEEC_SUCCESS` |
+| **Sensor Hardware** | Logcat `fps_qbt2000_init` | `fps_qbt2000_init: ret : 0`, model `S90X`, chip `QBT2608` |
+| **FOD Routing** | `/sys/class/sec/tsp/cmd_result` | `fod_enable,1:OK` |
+| **Enrollment** | `dumpsys fingerprint` | Enrollment client active, fingerprints successfully enrolled |
+| **Root Status** | `/data/adb/ksud --version` | `ksud 3.4.2 (uapi: 5)`, KernelSU Next active |
