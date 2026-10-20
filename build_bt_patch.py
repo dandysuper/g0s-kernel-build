@@ -158,9 +158,11 @@ def main():
     # Not one of the dropped modules may remain, and no dropped module's own
     # dependency may now be orphaned from the fragment's point of view -- the
     # fragment simply no longer mentions them at all.
-    leftover = DROP & set(after)
+    leftover = (DROP - {"dhd"} if append_last else DROP) & set(after)
     if leftover:
         raise SystemExit("still present after patch: %s" % ", ".join(sorted(leftover)))
+    if append_last and after[-1] != "dhd":
+        raise SystemExit("dhd is not the final entry")
 
     if os.path.isdir(STAGE):
         shutil.rmtree(STAGE)

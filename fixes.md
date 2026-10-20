@@ -201,3 +201,25 @@ Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/l
 | **FOD Routing** | `/sys/class/sec/tsp/cmd_result` | `fod_enable,1:OK` |
 | **Enrollment** | `dumpsys fingerprint` | Enrollment client active, fingerprints successfully enrolled |
 | **Root Status** | `/data/adb/ksud --version` | `ksud 3.4.2-50-gb427a3f9 (uapi: 6)`, Working (BUILT-IN GKI2, UAPI: 6) |
+
+---
+
+## 7. Ultrasonic Biometrics (QBT2608) Mid-Enrollment Abort Root Cause & Resolution
+
+### 7.1 Double Inversion Bug (`uses_percentage_samples`)
+- **Analysis:** Disassembly of `libbauthserver.so` (`FPBAuthService::enroll` @ `0x590ec` - `0x59108`) revealed that Samsung's vendor library naturally computes remaining samples as:
+  $$\text{remaining} = 100 - \text{percentage}$$
+- Setting `ro.vendor.fingerprint.uses_percentage_samples=true` caused LineageOS's AIDL HAL (`fp-service` @ `0xa83c`) to apply a second subtraction:
+  $$\text{remaining}_{\text{HAL}} = 100 - (100 - \text{percentage}) = \text{percentage}$$
+- This inverted the progress countdown (reporting increasing remaining touches instead of decreasing to 0), preventing Android framework from ever completing enrollment.
+- **Resolution:** Removed `ro.vendor.fingerprint.uses_percentage_samples` and `cancel_on_enroll_completion` from `/data/adb/` startup scripts and live properties.
+
+### 7.2 Qualcomm QFP Circuit Breaker (`ENROLL_FAIL_ON_MAX_REJECTS` / Code 70)
+- **Analysis:** Disassembly of Trustlet `00000000-0000-0000-0000-46494e474502` (`handle_do_enroll_stage_4_inject` @ `0x355b0` - `0x35650`) revealed that Qualcomm's `QFP_EnrollInject` has an internal limit on consecutive rejected touches:
+  - If a touch has poor acoustic impedance or identical surface features as previous touches, QFP rejects it (`BAuth_Enroll_Do Fail BAD_QUALITY or Enroll Fail : 39`).
+  - If 3-4 consecutive rejects occur without a successful capture, `QFP_EnrollInject` triggers `ENROLL_FAIL_ON_MAX_REJECTS` (code `-24`), which maps to return code `70` (`0x46`).
+  - Return code 70 aborts the session and triggers Android `errCode=8, VENDOR_ERROR(7)` ("Something went wrong. Try again.").
+- **Sensor Technique Requirements:**
+  - **Firm, flat contact:** Ultrasonic sensors measure acoustic impedance contrast. Very light or rapid tapping leaves air gaps under ridges.
+  - **Hold for ~0.5s:** Allow the transducer array to complete the acoustic sweep before lifting.
+  - **Reposition as prompted:** In the second phase (edges/tips), tilt the finger slightly to feed new ridge areas into `QFP_ImageFusion`.
