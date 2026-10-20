@@ -26,6 +26,10 @@
 - **Root Cause:** The kernel was built with KernelSU Next (`next` branch), which incorporated upstream commits (PR #3907 / commit `16be0f72`) bumping the Kernel UAPI version from 5 to 6 (`KERNEL_SU_UAPI_VERSION = 6`). The initial prebuilt Manager APK installed was `v3.4.2 (33355-5)`, which only supported UAPI 5. The manager detected the newer kernel interface and raised a warning banner disabling management features.
 - **Resolution:** Upgraded the Manager APK to `v3.4.2-50-gb427a3f9 (33405-6)` and updated `/data/adb/ksud` to `3.4.2-50-gb427a3f9 (uapi: 6)` from the latest KernelSU-Next CI build (`Build Manager CI` run `39297115788`).
 
+### Issue 4: Fingerprint Enrollment Failure Halfway ("Something went wrong. Try again.")
+- **Root Cause:** In `drivers/fingerprint/qbt2000_common.c`, the state transition functions (`qbt2000_disable_wuhb`, `qbt2000_enable_wuhb`, `qbt2000_disable_ipc`, `qbt2000_enable_ipc`) returned `-EINVAL` (-22) if the requested state was already active (e.g. disabling WUHB when already disabled). During enrollment, when finger positions or stages transition, the Samsung biometric HAL calls `QFPControl_DeviceEnableInt(0)` (`ioctl(fd, QBT2000_DISABLE_WUHB)`). When the kernel returned `-EINVAL`, `QFPControl_DeviceEnableInt` returned `-1`, prompting the HAL to log `enroll system fail BAuthSensorControl_DeviceEnableInt Enable Error : -1` and abort enrollment with error 8.
+- **Resolution:** Patched `fingerprint.ko` at offset `0x2088` (instruction `1dd4: mov w20, #-0x16` -> `2a1f03f4: mov w20, wzr`) so that idempotent enable/disable calls return `0` (Success). Installed the patched module to `/data/adb/modules_fixed/fingerprint.ko` and created missing Trustlet directories `/data/vendor/biometrics/{ta,bk,meta}`.
+
 ---
 
 ## 2. Implemented Fixes
@@ -95,8 +99,13 @@ if ! lsmod | grep -q "^fingerprint_sysfs "; then
 fi
 
 if ! lsmod | grep -q "^fingerprint "; then
-    echo "Loading fingerprint.ko..."
-    /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
+    if [ -f /data/adb/modules_fixed/fingerprint.ko ]; then
+        echo "Loading patched fingerprint.ko from /data/adb/modules_fixed/..."
+        /system/bin/insmod /data/adb/modules_fixed/fingerprint.ko
+    else
+        echo "Loading stock fingerprint.ko..."
+        /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
+    fi
     if lsmod | grep -q "^fingerprint "; then
         echo "fingerprint.ko loaded successfully."
         FP_LOADED_NOW=1
@@ -131,10 +140,14 @@ if [ -d /sys/class/fingerprint/fingerprint ]; then
     /system/bin/chown system:radio /sys/class/fingerprint/fingerprint/* 2>/dev/null || true
 fi
 
-# 6. Biometrics Template Directory
+# 6. Biometrics Template & Vendor Directories
 mkdir -p /data/vendor/biometrics/fp/User_0
+mkdir -p /data/vendor/biometrics/ta
+mkdir -p /data/vendor/biometrics/bk
+mkdir -p /data/vendor/biometrics/meta
 /system/bin/chown -R system:system /data/vendor/biometrics 2>/dev/null || true
 /system/bin/chmod -R 0770 /data/vendor/biometrics 2>/dev/null || true
+/system/bin/chcon -R u:object_r:biometrics_vendor_data_file:s0 /data/vendor/biometrics 2>/dev/null || true
 
 # 7. Restart HALs ONLY if drivers were newly loaded in this run
 if [ "$DHD_LOADED_NOW" = "1" ]; then
