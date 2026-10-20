@@ -22,6 +22,10 @@
 - **Root Cause D (Missing Template Directory):** The biometric directory `/data/vendor/biometrics/fp/User_0` did not exist on fresh ROM installations, causing template creation in `bauth_FPBAuthServiceStorage` to fail with `fopen is null: 2`.
 - **Root Cause E (Sysfs Node Ownership):** `/sys/class/fingerprint/fingerprint/*` nodes were owned by `root:root` instead of `system:radio`.
 
+### Issue 3: KernelSU Next Manager UAPI Mismatch ("Manager version 5 is too low... please upgrade to version 6 or higher")
+- **Root Cause:** The kernel was built with KernelSU Next (`next` branch), which incorporated upstream commits (PR #3907 / commit `16be0f72`) bumping the Kernel UAPI version from 5 to 6 (`KERNEL_SU_UAPI_VERSION = 6`). The initial prebuilt Manager APK installed was `v3.4.2 (33355-5)`, which only supported UAPI 5. The manager detected the newer kernel interface and raised a warning banner disabling management features.
+- **Resolution:** Upgraded the Manager APK to `v3.4.2-50-gb427a3f9 (33405-6)` and updated `/data/adb/ksud` to `3.4.2-50-gb427a3f9 (uapi: 6)` from the latest KernelSU-Next CI build (`Build Manager CI` run `39297115788`).
+
 ---
 
 ## 2. Implemented Fixes
@@ -87,10 +91,11 @@ pkill -f android.hardware.biometrics.fingerprint
 ```
 Permissions: `chmod 0755 /data/adb/service.d/load_drivers.sh`
 
-### D. Root Management
-- Installed official **KernelSU Next v3.4.2** manager (`com.rifsxd.ksunext`).
-- KernelSU daemon (`ksud`) initialized under `/data/adb/ksud`.
-- Root granted to UID 10228 (Manager).
+### D. Root Management & KernelSU Next UAPI 6 Alignment
+- Installed the matching **KernelSU Next Manager** APK `KernelSU_Next_v3.4.2-50-gb427a3f9_33405-release.apk` (built with UAPI 6 support) directly from GitHub Actions CI run `39297115788`.
+- Updated `/data/adb/ksud` to `ksud 3.4.2-50-gb427a3f9 (uapi: 6)` with permissions `0755 root:root`.
+- Kernel (`v3.4.2 (33405-6)`), Daemon (`uapi: 6`), and Manager (`v3.4.2-50-gb427a3f9 (33405-6)`) are now perfectly synchronized.
+- Preserved a copy of the matching APK under `artifact/KernelSU_Next_v3.4.2-50-gb427a3f9_33405-release.apk`.
 
 ---
 
@@ -106,4 +111,4 @@ Permissions: `chmod 0755 /data/adb/service.d/load_drivers.sh`
 | **Sensor Hardware** | Logcat `fps_qbt2000_init` | `fps_qbt2000_init: ret : 0`, model `S90X`, chip `QBT2608` |
 | **FOD Routing** | `/sys/class/sec/tsp/cmd_result` | `fod_enable,1:OK` |
 | **Enrollment** | `dumpsys fingerprint` | Enrollment client active, fingerprints successfully enrolled |
-| **Root Status** | `/data/adb/ksud --version` | `ksud 3.4.2 (uapi: 5)`, KernelSU Next active |
+| **Root Status** | `/data/adb/ksud --version` | `ksud 3.4.2-50-gb427a3f9 (uapi: 6)`, Working (BUILT-IN GKI2, UAPI: 6) |
