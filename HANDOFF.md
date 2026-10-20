@@ -201,11 +201,27 @@ PATH="/opt/homebrew/opt/llvm/bin:$PATH" python3 repack.py \
 `repack.py` writes `out/boot.img`, `out/vendor_boot.img`, `out/vendor_dlkm.img`, and packages
 `~/Downloads/ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip` (boot + vendor_boot + dtbo + vendor_dlkm).
 
-**Verify before flashing:**
-- `stat -f%z out/vendor_dlkm.img` must be **exactly 19,685,376** (it is zero-padded).
-- vermagic must prefix-match — kernel `5.10.260-g…`, module `5.10.260-g… SMP preempt mod_unload modversions aarch64`. `repack.py` hard-fails on mismatch.
-- `dhd.ko`, `cfg80211.ko`, `bcm43xx.ko` present in the built tree and inside `vendor_dlkm.img`.
+**Verification already performed on the shipped zip (`build-20261019-1920` → repack):**
+
+| Check | Result |
+|---|---|
+| `unzip -t` on the zip | *No errors detected in compressed data* |
+| `stat -f%z out/vendor_dlkm.img` | **19,685,376** — exact partition size |
+| zip contents | `boot.img`, `vendor_boot.img`, `dtbo.img`, `vendor_dlkm.img`, `update-binary`, `updater-script` |
+| kernel vermagic (from `boot.img`) | `5.10.260-g0d060df61c11-dirty SMP preempt mod_unload modversions aarch64` |
+| module vermagic (`dhd.ko` in dlkm) | identical string |
+| `.ko` count inside `vendor_dlkm` | **320** |
+| `modules.dep` path prefix | `/vendor_dlkm/lib/modules/…` (correct, depmod resolvable) |
+| `dhd.ko` dependencies | resolve to `pcie-exynos-rc.ko` + `exynos-pcie-iommu.ko` (the PCIe glue it binds to) |
+| `dhd.ko` in early `modules.load` | **absent** — correct, avoids the strict-mode abort |
+| `bcm43xx` in early `modules.load` | present at line 179, reachable |
+| `modules.load` entries | 313 |
+
+Everything checkable without the phone has been checked. **What remains is a physical step: flash and observe.**
 - Flash `boot`, `vendor_boot`, `dtbo`, `vendor_dlkm` **together**. A kernel/module mismatch = no Wi-Fi and usually no touch.
+- On boot, check: `dmesg | grep -i bcmdhd`, `dmesg | grep -i bcm43xx`, `ls /sys/class/rfkill/`, `ip link` for `wlan0`, `lsmod | grep dhd`.
+- If `dhd` never appears, a module ordered before it in `modules.load` failed under strict mode — `dmesg | grep -iE "failed|not found" | head` names it.
+- If `dhd` loads but `wlan0` never appears, the failure is firmware/PCIe rather than the module set: confirm the BCM4389 blobs are present under `/vendor/etc/wifi/`, since `dhd.ko` cannot bring the chip up without them.
 
 ---
 
