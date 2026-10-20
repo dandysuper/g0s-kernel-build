@@ -1,41 +1,55 @@
 #!/usr/bin/env python3
-"""Build the vendor_boot patch: Bluetooth + fingerprint, one partition, no kernel change.
+"""Rebuild the dlkm ramdisk fragment so Wi-Fi, Bluetooth and fingerprint all load.
 
 Ground truth is the real release zip
-(ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip), whose vendor_ramdisk01
-carries a 319-entry modules.load:
+(ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip). Its vendor_boot carries
+two ramdisks:
 
-    127  dhd                 <- fails here, /vendor not mounted yet
-    180  bcm43xx             <- Broadcom BT power/rfkill: NEVER REACHED
-    258  sec_debug_coredump
-    270  input_booster_lkm
-    276  fingerprint
-    277  fingerprint_sysfs   <- NEVER REACHED
-    282  s2dos05-regulator
+    vendor_ramdisk00   type 0x1         LineageOS init / fstab / encryption
+    vendor_ramdisk01   type 0x3 "dlkm"  the module fragment we patch
 
-Android first-stage init loads this list in **strict mode** and aborts the whole
-thing on the first module that fails. `dhd` cannot probe before /vendor is
-mounted because its firmware lives there, so it dies at 127 and entries 128-319
-are skipped. That single abort is why Bluetooth is dead AND why fingerprint
-enrolment never completes: `bcm43xx` and the two fingerprint modules are all
-downstream of it.
+The fragment's lib/modules/modules.load has 319 entries. Five of them cannot
+succeed there, because their firmware or configuration only exists once /vendor
+is mounted:
 
-The patch therefore does two things and nothing else:
+     127  dhd                  Broadcom Wi-Fi
+     258  sec_debug_coredump
+     270  input_booster_lkm
+     276  fingerprint
+     277  fingerprint_sysfs
 
-  1. delete `dhd` from the list, so loading no longer aborts at 127;
-  2. move `sec_debug_coredump` and `input_booster_lkm` to the tail.
+Those five are not a random set. /vendor_dlkm ships
+lib/modules/modules.load containing *exactly* those five, in that order:
 
-Step 2 matters because those two sit between `bcm43xx` (180) and `fingerprint`
-(276). If either one aborts once dhd is gone, fingerprint is skipped all over
-again. Moving them to the end costs nothing -- they are debug/booster modules
-that get their dependencies later anyway -- and it guarantees both payloads are
-reached before anything risky runs.
+    sec_debug_coredump
+    fingerprint
+    fingerprint_sysfs
+    input_booster_lkm
+    dhd
 
-Everything else keeps its exact original position, `s2dos05-regulator` included
-(it is a PMIC regulator and there is no reason to touch it).
+and all five .ko files are present in /vendor_dlkm. So the vendor's design is:
+the fragment loads the bulk, and these five are loaded later from /vendor_dlkm,
+at the point where /vendor exists.
 
-Only vendor_ramdisk01 inside vendor_boot.img changes. The kernel, dtbo,
-vendor_dlkm, the LineageOS fstab and encryption are reused byte-identically.
+The bug is that they are listed in the fragment as well. Module loading is
+strict -- the first failure aborts the remainder -- so dhd failing at 127 skipped
+`bcm43xx` at 180 (no Bluetooth) and everything after it, including the two
+fingerprint modules. Worse, an aborted fragment list means init never gets as far
+as processing /vendor_dlkm, so dhd never loads from there either: no Wi-Fi.
+
+Removing exactly those five:
+
+  * the fragment completes, so nothing after them is skipped;
+  * `bcm43xx` (now at 174) loads, so Bluetooth works;
+  * init proceeds to /vendor_dlkm, which loads dhd and the fingerprint modules
+    with /vendor available, so Wi-Fi and fingerprint work.
+
+Nothing else moves. `s2dos05-regulator` and every other entry keep their original
+position and original spelling.
+
+Only vendor_ramdisk01 inside vendor_boot.img is touched. The kernel, dtbo,
+vendor_dlkm, LineageOS fstab and encryption are reused byte-identically, and the
+zip writes to /dev/block/by-name/vendor_boot only.
 """
 
 import os
@@ -49,15 +63,21 @@ VR1 = os.path.join(SRC, "x")                        # extracted vendor_ramdisk01
 STAGE = os.path.join(BASE, "work", "btmin_stage")
 OUT_IMG = os.path.join(BASE, "work", "btmin_vendor_boot.img")
 
-# Confirmed failure: dhd cannot probe before /vendor is mounted.
-DROP = {"dhd"}
+# The five modules /vendor_dlkm is responsible for. Removing them from the
+# fragment list is what lets the fragment finish and /vendor_dlkm take over.
+DROP = {
+    "dhd",
+    "fingerprint",
+    "fingerprint_sysfs",
+    "input_booster_lkm",
+    "sec_debug_coredump",
+}
 
-# Sits between bcm43xx and fingerprint. Delayed rather than deleted so they
-# cannot abort the list before the modules we actually need are reached.
-DEFER_TO_END = {"sec_debug_coredump", "input_booster_lkm"}
+# Must stay in the fragment: this is the module that makes Bluetooth work.
+REQUIRED = ("bcm43xx",)
 
-# If any of these disappear the patch has no purpose.
-REQUIRED = ("bcm43xx", "fingerprint", "fingerprint_sysfs")
+# Sanity floor -- if the list shrank far past this something is very wrong.
+MIN_ENTRIES = 300
 
 
 def run(cmd):
@@ -72,6 +92,15 @@ def run(cmd):
 def stem(name):
     """modules.load mixes `foo` and `foo.ko`; compare on the stem."""
     return name[:-3] if name.endswith(".ko") else name
+
+
+def load_vendor_dlkm_list():
+    """Read /vendor_dlkm's own modules.load, if the extracted image is around."""
+    path = os.path.join(BASE, "work", "dlkm", "lib", "modules", "modules.load")
+    if not os.path.isfile(path):
+        return None
+    with open(path) as handle:
+        return {stem(line.strip()) for line in handle if line.strip()}
 
 
 def main():
@@ -91,37 +120,47 @@ def main():
         if name not in before:
             raise SystemExit("%s missing from the stock list -- wrong source tree" % name)
 
+    # The drop set must be exactly what /vendor_dlkm promises to load. If it is
+    # not, we would be deleting a module nothing else provides.
+    vendor_list = load_vendor_dlkm_list()
+    if vendor_list is not None:
+        missing = DROP - vendor_list
+        if missing:
+            raise SystemExit(
+                "these are dropped from the fragment but absent from "
+                "/vendor_dlkm's list, so nothing would load them: %s"
+                % ", ".join(sorted(missing)))
+        print("/vendor_dlkm covers  : %s" % ", ".join(sorted(vendor_list)))
+    else:
+        print("/vendor_dlkm covers  : (work/dlkm not present, skipped cross-check)")
+
     dropped = [n for n in raw if stem(n) in DROP]
     if not dropped:
         raise SystemExit("nothing to drop -- is this already patched?")
+    absent = DROP - {stem(n) for n in dropped}
+    if absent:
+        raise SystemExit("expected to drop but not in the list: %s"
+                         % ", ".join(sorted(absent)))
 
-    body = [n for n in raw if stem(n) not in DROP]
-    deferred = [n for n in body if stem(n) in DEFER_TO_END]
-    body = [n for n in body if stem(n) not in DEFER_TO_END]
-    kept = body + deferred
-
+    kept = [n for n in raw if stem(n) not in DROP]
     after = [stem(n) for n in kept]
+
+    if len(kept) < MIN_ENTRIES:
+        raise SystemExit("only %d entries left, expected at least %d"
+                         % (len(kept), MIN_ENTRIES))
 
     print("stock entries        : %d" % len(raw))
     print("dropping             : %s" % ", ".join(dropped))
-    print("deferred to tail     : %s" % (", ".join(deferred) if deferred else "(none)"))
     print("patched entries      : %d" % len(kept))
-
     for name in REQUIRED:
-        src = before.index(name) + 1
-        dst = after.index(name) + 1
-        print("  %-18s %3d -> %3d" % (name, src, dst))
-        if dst > len(body):
-            raise SystemExit("%s ended up inside the deferred tail" % name)
+        print("  %-12s %3d -> %3d" % (name, before.index(name) + 1, after.index(name) + 1))
 
-    # Every module we need must now sit before the deferred block, or a failure
-    # in that block could still skip it.
-    last_required = max(after.index(n) for n in REQUIRED)
-    if deferred and last_required >= len(body):
-        raise SystemExit("required modules are not ahead of the deferred tail")
-
-    print("  highest required index: %d of %d (tail starts at %d)"
-          % (last_required + 1, len(kept), len(body) + 1))
+    # Not one of the dropped modules may remain, and no dropped module's own
+    # dependency may now be orphaned from the fragment's point of view -- the
+    # fragment simply no longer mentions them at all.
+    leftover = DROP & set(after)
+    if leftover:
+        raise SystemExit("still present after patch: %s" % ", ".join(sorted(leftover)))
 
     if os.path.isdir(STAGE):
         shutil.rmtree(STAGE)
