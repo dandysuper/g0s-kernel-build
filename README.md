@@ -1,6 +1,8 @@
-# Samsung Galaxy S22+ (`g0s`) - LineageOS 24.0 (Android 17) & ExtremeKRNL Guide
+# Samsung Galaxy S22+ (`g0s`) - Official LineageOS 24.0 (Android 17) & ExtremeKRNL Guide
 
-A complete, battle-tested guide and toolchain to achieve a **fully functional LineageOS 24.0 (Android 17 / SDK 37)** installation on the **Samsung Galaxy S22+ (Exynos 2200 / `s5e9925`, model `SM-S906B`, codename `g0s`)** with working **Broadcom Wi-Fi**, **Qualcomm Ultrasonic Under-Display Fingerprint (FOD)**, and **KernelSU Next (UAPI 6)**.
+A complete, battle-tested guide and toolchain to achieve a **fully functional Official LineageOS 24.0 (Android 17 / SDK 37)** installation on the **Samsung Galaxy S22+ (Exynos 2200 / `s5e9925`, model `SM-S906B`, codename `g0s`)** with working **Broadcom Wi-Fi**, **Qualcomm Ultrasonic Under-Display Fingerprint (FOD)**, and **KernelSU Next (UAPI 6)**.
+
+All pre-patched, ready-to-flash partition images and modules are included directly in the [`kernel_files/`](kernel_files/) folder.
 
 ---
 
@@ -9,7 +11,7 @@ A complete, battle-tested guide and toolchain to achieve a **fully functional Li
 | Component | Status | Details |
 | :--- | :---: | :--- |
 | **Model** | ✅ | Samsung Galaxy S22+ (`SM-S906B`, Exynos 2200 / `s5e9925`, `g0s`) |
-| **Android OS** | ✅ | LineageOS 24.0 (Android 17 / SDK 37) |
+| **Android OS** | ✅ | **Official** LineageOS 24.0 (Android 17 / SDK 37) |
 | **Kernel** | ✅ | ExtremeKRNL 5.10.260 (`5.10.260-g0d060df61c11-dirty`) |
 | **Root Solution** | ✅ | KernelSU Next UAPI 6 (Manager v3.4.2+) |
 | **Wi-Fi 6 / 5 GHz** | ✅ | Broadcom BCM4389 (`dhd.ko` via PCIe), persistent across cold/warm reboots |
@@ -50,21 +52,27 @@ A complete, battle-tested guide and toolchain to achieve a **fully functional Li
 
 ## 3. Step-by-Step Installation Guide
 
-### Step 1: Install LineageOS 24.0 (Android 17)
+### Step 1: Install Official LineageOS 24.0 (Android 17)
 1. Ensure your bootloader is unlocked (`OEM unlocking` enabled in Developer Options, unlocked in Download Mode).
 2. Reboot to Download Mode (Power off, hold Volume Up + Volume Down and plug into PC).
-3. Flash LineageOS 24.0 Recovery using Odin or Heimdall.
+3. Flash Official LineageOS 24.0 Recovery using Odin or Heimdall.
 4. Boot into Lineage Recovery:
    - Select **Factory Reset** $\to$ **Format data/factory reset**.
 5. Select **Apply update** $\to$ **Apply from ADB**:
    ```bash
-   adb sideload lineage-24.0-*-UNOFFICIAL-g0s.zip
+   adb sideload lineage-24.0-*-g0s.zip
    ```
 6. *(Optional)* Sideload your preferred GApps package (e.g. MindTheGapps for Android 17).
 
 ---
 
 ### Step 2: Flash Patched ExtremeKRNL (UAPI 6) via fastbootd
+Pre-built, patched partition images are provided in the [`kernel_files/`](kernel_files/) folder:
+- `kernel_files/boot.img` (ExtremeKRNL 5.10.260 with KernelSU Next UAPI 6)
+- `kernel_files/vendor_boot.img`
+- `kernel_files/dtbo.img`
+- `kernel_files/vendor_dlkm.img`
+
 > [!IMPORTANT]
 > `vendor_dlkm` is a dynamic partition inside the `super` container. It **cannot** be flashed via standard recovery sideload zips. You **must** flash it via **fastbootd**.
 
@@ -73,22 +81,23 @@ A complete, battle-tested guide and toolchain to achieve a **fully functional Li
    ```bash
    fastboot devices
    ```
-3. Flash the kernel and vendor partitions:
+3. Flash the kernel and vendor partitions from `kernel_files/`:
    ```bash
+   cd kernel_files
    fastboot flash boot boot.img
    fastboot flash vendor_boot vendor_boot.img
    fastboot flash dtbo dtbo.img
    fastboot flash vendor_dlkm vendor_dlkm.img
    fastboot reboot
    ```
-4. Allow phone to boot into LineageOS 24.0.
+4. Allow phone to boot into Official LineageOS 24.0.
 
 ---
 
 ### Step 3: Install KernelSU Next Manager & Root Verification
-1. Download and install **KernelSU Next Manager v3.4.2+** APK:
+1. Download and install **KernelSU Next Manager v3.4.2+** from [KernelSU Next Releases](https://github.com/KernelSU-Next/KernelSU-Next/releases):
    ```bash
-   adb install KernelSU_Next_v3.4.2.apk
+   adb install KernelSU_Next_v3.4.2*.apk
    ```
 2. Open KernelSU Next Manager and verify:
    - Status: **Working**
@@ -98,32 +107,23 @@ A complete, battle-tested guide and toolchain to achieve a **fully functional Li
 
 ---
 
-### Step 4: Patch the Fingerprint Kernel Module (`fingerprint.ko`)
-The stock `fingerprint.ko` must be patched to prevent duplicate enable `-EINVAL` (-22) errors:
+### Step 4: Install Patched Fingerprint Driver (`fingerprint.ko`)
+The pre-patched driver is already provided at `kernel_files/fingerprint_fixed.ko` (offset `0x2088` patched to `mov w20, wzr` to prevent duplicate enable `-EINVAL` -22 errors).
 
-1. Pull `fingerprint.ko` from the device:
-   ```bash
-   adb shell "su -c 'cp /vendor_dlkm/lib/modules/fingerprint.ko /sdcard/'"
-   adb pull /sdcard/fingerprint.ko .
-   ```
-2. Run the included patch script:
-   ```bash
-   python3 patch_fingerprint.py fingerprint.ko fingerprint_fixed.ko
-   ```
-   *(Verifies byte replacement at offset `0x2088`: `b4028012` $\to$ `f4031f2a`).*
-3. Push the patched module into KernelSU's persistent modules directory:
+1. Push the pre-patched module into KernelSU's persistent modules directory:
    ```bash
    adb shell "su -c 'mkdir -p /data/adb/modules_fixed'"
-   adb push fingerprint_fixed.ko /sdcard/
+   adb push kernel_files/fingerprint_fixed.ko /sdcard/
    adb shell "su -c 'cp /sdcard/fingerprint_fixed.ko /data/adb/modules_fixed/fingerprint.ko && chmod 0644 /data/adb/modules_fixed/fingerprint.ko'"
    ```
+*(Note: If you ever want to patch a new stock `fingerprint.ko` yourself, run: `python3 patch_fingerprint.py <stock_fingerprint.ko> <output_fingerprint.ko>`)*
 
 ---
 
 ### Step 5: Install Driver Loader & Boot Persistence (`load_drivers.sh`)
-[`load_drivers.sh`](file:///Users/danb/Documents/kernel/load_drivers.sh) orchestrates the correct loading order for Wi-Fi and fingerprint drivers, configures TSP hardware FOD boundaries, initializes biometrics permissions, and ensures full persistence across cold/warm reboots.
+[`load_drivers.sh`](load_drivers.sh) orchestrates the correct loading order for Wi-Fi and fingerprint drivers, configures TSP hardware FOD boundaries, initializes biometrics permissions, and ensures full persistence across cold/warm reboots.
 
-1. Push [`load_drivers.sh`](file:///Users/danb/Documents/kernel/load_drivers.sh) into KernelSU startup stages:
+1. Push [`load_drivers.sh`](load_drivers.sh) into KernelSU startup stages:
    ```bash
    adb push load_drivers.sh /data/adb/post-fs-data.d/load_drivers.sh
    adb push load_drivers.sh /data/adb/service.d/load_drivers.sh
@@ -177,13 +177,14 @@ adb shell "dumpsys fingerprint | grep -E 'mCurrentFocus|Enrolled'"
 
 ---
 
-## 5. Repository Tool Reference
+## 5. Repository File Reference
 
-| File | Purpose |
+| File / Folder | Purpose |
 | :--- | :--- |
-| [`load_drivers.sh`](file:///Users/danb/Documents/kernel/load_drivers.sh) | All-in-one boot persistence script (Wi-Fi, fingerprint, TSP FOD rect, permissions) |
-| [`patch_fingerprint.py`](file:///Users/danb/Documents/kernel/patch_fingerprint.py) | Python utility to patch `fingerprint.ko` offset `0x2088` (`mov w20, wzr`) |
-| [`build_bt_patch.py`](file:///Users/danb/Documents/kernel/build_bt_patch.py) | Repacks boot/vendor_boot ramdisk module manifests for KernelSU Next |
-| [`repack.py`](file:///Users/danb/Documents/kernel/repack.py) | Android boot image unpacking, patching, and repacking engine |
-| [`fixes.md`](file:///Users/danb/Documents/kernel/fixes.md) | Exhaustive reverse-engineering documentation, disassembly traces, and root causes |
-| [`.github/workflows/build.yml`](file:///.github/workflows/build.yml) | GitHub Actions CI workflow building ExtremeKRNL with KernelSU Next UAPI 6 |
+| [`kernel_files/`](kernel_files/) | Pre-built partition images (`boot.img`, `vendor_boot.img`, `dtbo.img`, `vendor_dlkm.img`), and patched `fingerprint_fixed.ko` |
+| [`load_drivers.sh`](load_drivers.sh) | All-in-one boot persistence script (Wi-Fi, fingerprint, TSP FOD rect, permissions) |
+| [`patch_fingerprint.py`](patch_fingerprint.py) | Python utility to patch `fingerprint.ko` offset `0x2088` (`mov w20, wzr`) |
+| [`build_bt_patch.py`](build_bt_patch.py) | Repacks boot/vendor_boot ramdisk module manifests for KernelSU Next |
+| [`repack.py`](repack.py) | Android boot image unpacking, patching, and repacking engine |
+| [`fixes.md`](fixes.md) | Exhaustive reverse-engineering documentation, disassembly traces, and root causes |
+| [`.github/workflows/build.yml`](.github/workflows/build.yml) | GitHub Actions CI workflow building ExtremeKRNL with KernelSU Next UAPI 6 |
