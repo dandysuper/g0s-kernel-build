@@ -244,12 +244,29 @@ entry  module                  consequence
 
 Android first-stage init loads that list in **strict mode** and aborts the entire remainder on the first failure. `dhd.ko` cannot probe before `/vendor` is mounted — its firmware lives there — so it dies at 127 and entries 128–319 are skipped. That single abort is why Bluetooth is dead *and* why fingerprint enrolment never completes: `bcm43xx` and both fingerprint modules are downstream of it.
 
-**The patch does two things:**
+### v1 was wrong — it removed `dhd` and broke Wi-Fi
 
-1. **delete `dhd`** — loading no longer aborts at 127;
-2. **move `sec_debug_coredump` and `input_booster_lkm` to the tail** — they sit between `bcm43xx` (180) and `fingerprint` (276), so if either aborted once `dhd` was gone, fingerprint would be skipped all over again. Deferring them costs nothing (they are debug/booster modules that get their dependencies later) and guarantees both payloads are reached first.
+The first patch deleted `dhd` from the fragment outright. Bluetooth came up (that proved the abort theory) but Wi-Fi died completely: `dhd` is the Broadcom Wi-Fi driver, so removing it from the only list that was reaching it meant no `wlan0` at all.
 
-Everything else keeps its original position, including `s2dos05-regulator` — no reason to touch a PMIC regulator.
+That failure is the diagnostic that resolved the whole picture. `/vendor_dlkm/lib/modules/modules.load` contains **exactly those same five modules**:
+
+```
+sec_debug_coredump
+fingerprint
+fingerprint_sysfs
+input_booster_lkm
+dhd
+```
+
+and all five `.ko` files are present in `/vendor_dlkm`. So the vendor's design is: the dlkm fragment loads the bulk, and these five are loaded from `/vendor_dlkm` later, when `/vendor` exists. They are in the fragment list **as well**, where they cannot possibly succeed — and because loading is strict, their failure aborts the fragment, and init never gets as far as processing `/vendor_dlkm`, so `dhd` never loads from anywhere. That is why stock ExtremeKRNL had neither Wi-Fi nor Bluetooth.
+
+### v2 — drop exactly those five
+
+Removing precisely the set `/vendor_dlkm` owns:
+
+* the fragment completes, so nothing after them is skipped;
+* `bcm43xx` (now 179) loads → **Bluetooth**;
+* init proceeds to `/vendor_dlkm`, which loads `dhd` and the fingerprint modules with `/vendor` available → **Wi-Fi + fingerprint**.
 
 **Proof — the complete diff against stock:**
 
@@ -261,36 +278,38 @@ $ diff stock/modules.load patched/modules.load
 < sec_debug_coredump.ko
 270d267
 < input_booster_lkm.ko
-319a317,318
-> sec_debug_coredump.ko
-> input_booster_lkm.ko
+276,277d272
+< fingerprint.ko
+< fingerprint_sysfs.ko
 ```
 
-Resulting positions: `bcm43xx` 179, `fingerprint` 273, `fingerprint_sysfs` 274, deferred block 317–318, 318 entries total. Both fixes sit well ahead of anything that might abort.
+314 entries. `bcm43xx` 180 → 179. Nothing else moves; `s2dos05-regulator` keeps its place.
+
+**Dependency check:** the only remaining module that referenced any dropped module was `fingerprint.ko → fingerprint_sysfs.ko`, and both are dropped together, so nothing is orphaned. `fingerprint`'s other dependency, `exynos_pm_qos.ko`, stays in the fragment.
 
 The other image inputs are **byte-identical**: `dtb` (369,404 B), `bootconfig` (28 B), `vendor_ramdisk00` (211,300 B — the LineageOS fstab and init binaries). `dhd.ko` was never a file in this ramdisk (it lives in `vendor_dlkm`), so no module file was removed.
 
-**The artifact:** `~/Downloads/fix-BT-FINGERPRINT-g0s.zip` (12,671,228 bytes)
+**The artifact:** `~/Downloads/g0s-fix-wifi-bt-fingerprint-v2.zip` (12,671,094 bytes)
 
 | Check | Result |
 |---|---|
 | zip integrity | `No errors detected in compressed data` |
 | files in zip | `updater-script`, `update-binary`, `files/vendor_boot.img` — nothing else |
 | `package_extract_file` calls | **1**, targeting `/dev/block/by-name/vendor_boot` |
-| `modules.load` | 318 entries |
-| `dhd` present | no |
-| `bcm43xx` | line 179 |
-| `fingerprint` / `fingerprint_sysfs` | lines 273 / 274 |
+| `modules.load` | 314 entries |
+| the five dropped | `dhd`, `fingerprint`, `fingerprint_sysfs`, `input_booster_lkm`, `sec_debug_coredump` |
+| `bcm43xx` | line 179, still present |
+| `dtb` / `bootconfig` / `vendor_ramdisk00` | byte-identical to stock (`cmp`) |
 | built for kernel | `5.10.269-ExtremeKRNL-v2.5+` |
 
 **Flash it:**
 
 ```bash
 # recovery: reboot to recovery, "Apply update from ADB", then
-adb sideload ~/Downloads/fix-BT-FINGERPRINT-g0s.zip
+adb sideload ~/Downloads/g0s-fix-wifi-bt-fingerprint-v2.zip
 
 # or no recovery, rooted device (KernelSU):
-./flash_bt_adb.sh --zip ~/Downloads/fix-BT-FINGERPRINT-g0s.zip --mode dd
+./flash_bt_adb.sh --zip ~/Downloads/g0s-fix-wifi-bt-fingerprint-v2.zip --mode dd
 ```
 
 `flash_bt_adb.sh` handles both paths, pulls the image out of the zip, backs up the current `vendor_boot` partition to `/data/local/tmp/vendor_boot.bak.img`, writes with `dd bs=4096`, and md5-checks the readback.
@@ -313,25 +332,27 @@ python3 unpack_bootimg.py --boot_img work/btorig/files/vendor_boot.img --out wor
 cd work/btorig/u && lz4 -l -d -f vendor_ramdisk01 r.cpio \
   && mkdir -p x && cd x && cpio -idm --quiet < ../r.cpio && cd ../../../..
 
-# 3. drop dhd.ko, defer the two blockers, repack, wrap
+# 3. drop the five /vendor_dlkm owns, repack, wrap
 python3 build_bt_patch.py
 python3 package_patch_zip.py --image work/btmin_vendor_boot.img \
-  --out "~/Downloads/fix-BT-FINGERPRINT-g0s.zip" --kernel "5.10.269-ExtremeKRNL-v2.5+"
+  --out "~/Downloads/g0s-fix-wifi-bt-fingerprint-v2.zip" --kernel "5.10.269-ExtremeKRNL-v2.5+"
 ```
 
-`build_bt_patch.py` is driven by two constants:
+`build_bt_patch.py` constants:
 
 | constant | value | effect |
 |---|---|---|
-| `DROP` | `{"dhd"}` | removes the module that aborts the list at 127 |
-| `DEFER_TO_END` | `{"sec_debug_coredump", "input_booster_lkm"}` | moves the two modules that sit between `bcm43xx` and `fingerprint` to the tail |
-| `REQUIRED` | `bcm43xx`, `fingerprint`, `fingerprint_sysfs` | build fails if any is missing, or if any ends up inside the deferred tail |
+| `DROP` | `dhd`, `fingerprint`, `fingerprint_sysfs`, `input_booster_lkm`, `sec_debug_coredump` | exactly the set `/vendor_dlkm/lib/modules/modules.load` declares |
+| `REQUIRED` | `bcm43xx` | build fails if it is missing from the source list |
+| `MIN_ENTRIES` | `300` | guards against an accidental mass deletion |
+
+The script cross-checks `DROP` against `work/dlkm/lib/modules/modules.load` and **refuses to build** if it would drop a module `/vendor_dlkm` does not promise to load — that is the check that prevents ever producing another Wi-Fi-killing zip.
 
 It rebuilds `vendor_boot.img` reusing the source `dtb` / `bootconfig` / `vendor_ramdisk00` untouched. Verify the rebuild with:
 
 ```bash
-diff work/btorig/u/x/lib/modules/modules.load work/btv/u/x/lib/modules/modules.load
-# expected: 127d126, 258d256, 270d267, 319a317,318
+diff work/btorig/u/x/lib/modules/modules.load work/btv2/u/x/lib/modules/modules.load
+# expected: 127d126, 258d256, 270d267, 276,277d272
 ```
 
 **If Bluetooth is still dead after flashing**, ordering was not the cause on your build — check, in this order:
