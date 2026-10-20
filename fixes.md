@@ -55,41 +55,117 @@ fastboot flash dtbo dtbo.img
 fastboot flash vendor_dlkm vendor_dlkm.img
 ```
 
-### C. Driver Loading & Hardware Permissions
-To prevent first-stage init ramdisk kernel panics while ensuring drivers are ready before the user interacts with Android, drivers and hardware permissions are loaded safely via late-stage boot.
+### C. Driver Loading & Hardware Permissions (Multi-Stage Boot Persistence)
+To prevent first-stage init ramdisk kernel panics while ensuring drivers are ready before the user or Android framework interacts with hardware:
+- **BusyBox vs Android modprobe incompatibility:** KernelSU executes boot scripts via BusyBox ash with `ASH_STANDALONE=1`. Under this environment, BusyBox intercepts bare commands like `modprobe` and dispatches them to its built-in applet, which rejects the `-d <DIR>` argument (`modprobe: invalid option -- d`). All driver load invocations MUST explicitly call `/system/bin/modprobe`.
+- **Multi-Stage Orchestration:** The startup script is deployed to three stages (`post-fs-data.d`, `service.d`, and `boot-completed.d`):
+  1. `post-fs-data.d`: Loads `dhd.ko`, `fingerprint_sysfs.ko`, and `fingerprint.ko` via `/system/bin/modprobe -d /vendor_dlkm/lib/modules ...`, creates `/dev/qbt2000*` nodes, and applies `0660 system:system` permissions *before* Android HAL services start. This prevents HAL death on initial boot (`HAL deaths since last reboot: 0`).
+  2. `service.d`: Acts as a fallback sanity check and verifies permissions.
+  3. `boot-completed.d`: Re-verifies FOD state and ensures Wi-Fi is enabled (`cmd wifi set-wifi-enabled enabled`) if Android framework entered `DisabledState` during early boot.
+- All actions are logged with timestamps to `/data/adb/load_drivers.log`.
 
-The startup script was installed to `/data/adb/service.d/load_drivers.sh` (and mirrored to `/data/adb/post-fs-data.d/load_drivers.sh`):
-
+The script:
 ```bash
 #!/system/bin/sh
+LOGFILE="/data/adb/load_drivers.log"
+exec >> "$LOGFILE" 2>&1
+echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] load_drivers ($0, PID $$) ==="
 
-# 1. Load Broadcom PCIe Wi-Fi driver
-modprobe -d /vendor_dlkm/lib/modules dhd
+DHD_LOADED_NOW=0
+FP_LOADED_NOW=0
 
-# 2. Load Qualcomm 3D Sonic Fingerprint sensor drivers
-modprobe -d /vendor_dlkm/lib/modules fingerprint_sysfs
-modprobe -d /vendor_dlkm/lib/modules fingerprint
+# 1. Broadcom Wi-Fi Driver
+if ! lsmod | grep -q "^dhd "; then
+    echo "Loading dhd.ko..."
+    /system/bin/modprobe -d /vendor_dlkm/lib/modules dhd
+    if lsmod | grep -q "^dhd "; then
+        echo "dhd.ko loaded successfully."
+        DHD_LOADED_NOW=1
+    else
+        echo "Failed to load dhd.ko!"
+    fi
+else
+    echo "dhd.ko already present."
+fi
 
-# 3. Ensure device permissions for biometric HAL
-chown system:system /dev/qbt2000*
-chmod 0660 /dev/qbt2000*
+# 2. Fingerprint Drivers
+if ! lsmod | grep -q "^fingerprint_sysfs "; then
+    echo "Loading fingerprint_sysfs.ko..."
+    /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint_sysfs
+fi
 
-# 4. Enable Touchscreen FOD (Fingerprint on Display) mode
-echo "fod_enable,1" > /sys/class/sec/tsp/cmd
+if ! lsmod | grep -q "^fingerprint "; then
+    echo "Loading fingerprint.ko..."
+    /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
+    if lsmod | grep -q "^fingerprint "; then
+        echo "fingerprint.ko loaded successfully."
+        FP_LOADED_NOW=1
+    else
+        echo "Failed to load fingerprint.ko!"
+    fi
+else
+    echo "fingerprint.ko already present."
+fi
 
-# 5. Fix sysfs fingerprint node permissions
-chown system:radio /sys/class/fingerprint/fingerprint/*
+# 3. Fix /dev/qbt2000* permissions
+for i in 1 2 3 4 5; do
+    if [ -e /dev/qbt2000_fd ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -e /dev/qbt2000_fd ] || [ -e /dev/qbt2000_ipc ]; then
+    /system/bin/chown system:system /dev/qbt2000* 2>/dev/null || true
+    /system/bin/chmod 0660 /dev/qbt2000* 2>/dev/null || true
+    echo "/dev/qbt2000* permissions verified."
+fi
 
-# 6. Ensure biometrics template directories exist
+# 4. Touchscreen FOD mode
+if [ -e /sys/class/sec/tsp/cmd ]; then
+    echo "fod_enable,1" > /sys/class/sec/tsp/cmd 2>/dev/null || true
+    echo "FOD cmd result: $(cat /sys/class/sec/tsp/cmd_result 2>/dev/null || cat /sys/class/sec/tsp/cmd_status 2>/dev/null)"
+fi
+
+# 5. Sysfs fingerprint node permissions
+if [ -d /sys/class/fingerprint/fingerprint ]; then
+    /system/bin/chown system:radio /sys/class/fingerprint/fingerprint/* 2>/dev/null || true
+fi
+
+# 6. Biometrics Template Directory
 mkdir -p /data/vendor/biometrics/fp/User_0
-chown -R system:system /data/vendor/biometrics
-chmod -R 0770 /data/vendor/biometrics
+/system/bin/chown -R system:system /data/vendor/biometrics 2>/dev/null || true
+/system/bin/chmod -R 0770 /data/vendor/biometrics 2>/dev/null || true
 
-# 7. Restart HALs to bind newly initialized hardware
-pkill -f android.hardware.wifi-service
-pkill -f android.hardware.biometrics.fingerprint
+# 7. Restart HALs ONLY if drivers were newly loaded in this run
+if [ "$DHD_LOADED_NOW" = "1" ]; then
+    echo "dhd.ko was newly loaded, restarting wifi-service..."
+    /system/bin/pkill -f android.hardware.wifi-service || true
+fi
+
+if [ "$FP_LOADED_NOW" = "1" ]; then
+    echo "fingerprint was newly loaded, restarting fingerprint-service..."
+    /system/bin/pkill -f android.hardware.biometrics.fingerprint || true
+fi
+
+# 8. Wi-Fi enable watchdog
+if [ "$(getprop sys.boot_completed)" = "1" ]; then
+    for attempt in 1 2 3 4 5; do
+        WIFI_STATUS=$(cmd wifi status 2>/dev/null || true)
+        if echo "$WIFI_STATUS" | grep -q "Wifi is disabled"; then
+            echo "Wi-Fi is disabled, sending enable command (attempt $attempt)..."
+            cmd wifi set-wifi-enabled enabled 2>/dev/null || true
+            sleep 2
+        elif echo "$WIFI_STATUS" | grep -q "Wifi is enabled"; then
+            echo "Wi-Fi is confirmed enabled."
+            break
+        fi
+        sleep 2
+    done
+fi
+
+echo "=== load_drivers finished ==="
 ```
-Permissions: `chmod 0755 /data/adb/service.d/load_drivers.sh`
+Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/load_drivers.sh`
 
 ### D. Root Management & KernelSU Next UAPI 6 Alignment
 - Installed the matching **KernelSU Next Manager** APK `KernelSU_Next_v3.4.2-50-gb427a3f9_33405-release.apk` (built with UAPI 6 support) directly from GitHub Actions CI run `39297115788`.
