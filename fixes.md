@@ -201,6 +201,11 @@ Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/l
 | **FOD Routing** | `/sys/class/sec/tsp/cmd_result` | `fod_enable,1:OK` |
 | **Enrollment** | `dumpsys fingerprint` | Enrollment client active, fingerprints successfully enrolled |
 | **Root Status** | `/data/adb/ksud --version` | `ksud 3.4.2-50-gb427a3f9 (uapi: 6)`, Working (BUILT-IN GKI2, UAPI: 6) |
+| **VPN Tunnel** | `dumpsys vpn_management` | Connected, validated, no disconnect loops |
+| **VPN Throughput** | `curl -s https://speed.cloudflare.com` | ~3.5 MB/s (~28 Mbps) sustained throughput |
+| **TCP Clamping** | `iptables -t mangle -S POSTROUTING` | `TCPMSS --clamp-mss-to-pmtu` active for IPv4 & IPv6 |
+| **UFS Cache Affinity**| `/sys/block/sda/queue/rq_affinity` | `2` (local core request completion) |
+| **ZRAM Paging** | `/sys/block/zram0/queue/read_ahead_kb` | `0` (zero redundant decompression) |
 
 ---
 
@@ -223,3 +228,50 @@ Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/l
   - **Firm, flat contact:** Ultrasonic sensors measure acoustic impedance contrast. Very light or rapid tapping leaves air gaps under ridges.
   - **Hold for ~0.5s:** Allow the transducer array to complete the acoustic sweep before lifting.
   - **Reposition as prompted:** In the second phase (edges/tips), tilt the finger slightly to feed new ridge areas into `QFP_ImageFusion`.
+
+---
+
+## 8. VPN Connectivity, Routing & Kernel Performance/Efficiency Tuning
+
+### 8.1 VPN Stalling, Dropouts & Handshake Timeouts
+- **Root Cause A (Path MTU Black Hole):** VPN tunnels (WireGuard, OpenVPN, Cloudflare WARP MASQUE/QUIC) encapsulate network packets, reducing the usable MTU from 1500 bytes to 1280–1420 bytes. Under default Android sysctl `net.ipv4.tcp_mtu_probing = 0`, intermediate hops or tunnel endpoints that drop oversized packets with the Don't Fragment (DF) bit set without returning ICMP Fragmentation Needed create a "black hole". This caused connections to stall or drop after 15–20 seconds.
+- **Root Cause B (TCP MSS Mismatch):** When client sockets initiate connections with standard MSS (1460 bytes for IPv4, 1440 for IPv6), encapsulated packets exceed tunnel MTU. Without TCP MSS Clamping, fragmented packets were discarded by strict carrier middleboxes.
+- **Root Cause C (Strict Asymmetric Routing Drops):** On dual-connection devices (Wi-Fi + Cellular + VPN), strict reverse-path filtering (`rp_filter = 1`) dropped return packets whose ingress interface differed from the default outbound route.
+
+### 8.2 Performance & Battery Efficiency Bottlenecks
+- **Scheduler Accounting Overhead:** `kernel.sched_schedstats = 1` maintained continuous per-task scheduler statistics on every context switch and tick across all 8 cores, wasting CPU cycles in the background.
+- **Process Fork Latency:** `kernel.sched_child_runs_first = 0` yielded CPU to the parent process first upon `fork()`, adding measurable latency to app launch animations.
+- **UFS 3.1 Interrupt Locality:** `rq_affinity = 1` allowed block I/O completion interrupts to execute on arbitrary CPU cores rather than the requesting core, triggering cross-core cache invalidations and L2/L3 cache misses.
+- **ZRAM Decompression Churn:** `read_ahead_kb = 128` forced the kernel to read and decompress 128 KB chunks from ZRAM even when only a 4 KB page was needed. Because ZRAM is compressed RAM with zero seek time, read-ahead only wasted CPU cycles and battery.
+- **VFS Cache Premature Reclaim:** Default `vm.vfs_cache_pressure = 100` aggressively reclaimed directory and inode caches, requiring frequent re-reads of filesystem metadata during app switching.
+
+### 8.3 Tuning Implementation
+All optimizations are executed automatically on boot via `/data/adb/service.d/load_drivers.sh` and `/data/adb/boot-completed.d/load_drivers.sh`:
+```bash
+# Network & VPN Packet Flow Fixes
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+sysctl -w net.ipv4.tcp_mtu_probing=1
+sysctl -w net.ipv4.conf.all.rp_filter=2
+sysctl -w net.ipv4.conf.default.rp_filter=2
+sysctl -w net.ipv4.tcp_fastopen=3
+sysctl -w net.core.rmem_max=8388608
+sysctl -w net.core.wmem_max=8388608
+sysctl -w net.ipv4.tcp_rmem="4096 87380 8388608"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"
+
+# TCP MSS Clamping for VPN Tunnels
+iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+# Kernel Scheduler & Storage Optimization
+sysctl -w kernel.sched_schedstats=0
+sysctl -w kernel.sched_child_runs_first=1
+sysctl -w vm.vfs_cache_pressure=80
+echo 2 > /sys/block/sda/queue/rq_affinity
+echo 0 > /sys/block/sda/queue/iostats
+echo 128 > /sys/block/sda/queue/nr_requests
+echo 0 > /sys/block/zram0/queue/read_ahead_kb
+```

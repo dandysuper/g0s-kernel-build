@@ -19,6 +19,9 @@ All pre-patched, ready-to-flash partition images and modules are included direct
 | **Under-Display FOD** | ✅ | Hardware TSP bounding box mapped (`set_fod_rect,426,1675,654,1903`) |
 | **Display / Touch** | ✅ | 120 Hz Dynamic AMOLED, capacitive touchscreen (`stm_ts_spi`) |
 | **Audio / Calls / BT** | ✅ | Functional |
+| **VPN & Tunnels** | ✅ | WireGuard, OpenVPN, Cloudflare WARP (MASQUE/QUIC), TCP MSS clamping, MTU auto-probing |
+| **Storage & I/O** | ✅ | UFS 3.1 request affinity core-pinned (`rq_affinity=2`), zero-overhead iostats |
+| **Battery & CPU** | ✅ | Scheduler profiling disabled (`schedstats=0`), zero-churn ZRAM paging (`read_ahead_kb=0`) |
 
 ---
 
@@ -47,6 +50,10 @@ All pre-patched, ready-to-flash partition images and modules are included direct
 5. **Qualcomm QFP 3-Reject Circuit Breaker (`ENROLL_FAIL_ON_MAX_REJECTS` / Error 70):**
    - Qualcomm's Trustlet has an internal limit of 3-4 consecutive rejected touches. If a user taps rapidly in the exact same spot without moving their finger, Qualcomm `ImageFusion` rejects the touch (`BAuth_Enroll_Do Fail BAD_QUALITY : 39`). If 3 consecutive rejects occur, QFP aborts the session with error 70 (`Something went wrong. Try again.`).
    - **Fix:** TSP FOD active rectangle configured + proper enrollment technique documented.
+
+6. **VPN Drops, Path MTU Black Holes & Latency Optimization:**
+   - Under standard Android 17 network settings, VPN tunnels encapsulating packets reduce the usable MTU below 1500 bytes. With `net.ipv4.tcp_mtu_probing = 0` and un-clamped TCP MSS, packets with the Don't Fragment (DF) bit set are silently discarded by intermediate routers, causing VPNs to stall, timeout, or drop connections. Additionally, background scheduler statistics and UFS interrupt contention increased latency.
+   - **Fix:** Automated PLPMTUD (`net.ipv4.tcp_mtu_probing = 1`), IPv4 & IPv6 TCP MSS Clamping (`--clamp-mss-to-pmtu`), loose reverse path filtering (`rp_filter = 2`), and UFS interrupt affinity core-pinning (`rq_affinity = 2`) with zero-overhead ZRAM paging (`read_ahead_kb = 0`).
 
 ---
 
