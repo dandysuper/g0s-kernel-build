@@ -225,6 +225,62 @@ Everything checkable without the phone has been checked. **What remains is a phy
 
 ---
 
+## 7b. Bluetooth-only patch (standalone, flashes one partition)
+
+Built on request: a zip that fixes Bluetooth **without touching the kernel, dtbo or vendor_dlkm**.
+
+**Why this is safe to flash alone.** The Bluetooth failure is not a kernel bug — it is a `modules.load` ordering bug. First-stage init loads the list in strict mode and aborts on the first failure; `dhd.ko` fails there (no `/vendor` yet, so no firmware), and everything after it is skipped, including `bcm43xx.ko`. That list lives *only* inside `vendor_ramdisk01` inside `vendor_boot.img`. So replacing `vendor_boot.img` is the entire fix, and the kernel, dtbo, vendor_dlkm, fstab and encryption are all left byte-identical.
+
+**Two variants, because the modules in `vendor_ramdisk01` must match the running kernel.** Flashing the wrong one gives no Wi-Fi, no BT and possibly no touch — pick by the kernel you actually booted:
+
+| File | Kernel it is for | Modules inside |
+|---|---|---|
+| `~/Downloads/bt-fix-g0s_ExtremeKRNL-5.10.269.zip` | `5.10.269-ExtremeKRNL-v2.5+` (the original ExtremeKRNL kernel) | 319, vermagic `5.10.269-ExtremeKRNL-v2.5+ SMP preempt mod_unload modversions aarch64` |
+| `~/Downloads/bt-fix-g0s_NewKernel-5.10.260.zip` | `5.10.260-g0d060df61c11-dirty` (the kernel from our 45 MB zip) | 320, vermagic `5.10.260-g0d060df61c11-dirty SMP preempt mod_unload modversions aarch64` |
+
+Check which one you have: `adb shell uname -r`.
+
+**Verified for both zips:** exactly **one** `package_extract_file` call, targeting `/dev/block/by-name/vendor_boot`; 313-entry `modules.load`; `dhd` absent; `bcm43xx` at line 179 (after its 24 dependencies); correct vermagic for each.
+
+**Flash it:**
+
+```bash
+# recovery: reboot to recovery, "Apply update from ADB", then
+adb sideload ~/Downloads/bt-fix-g0s_ExtremeKRNL-5.10.269.zip
+
+# or no recovery, rooted device (KernelSU):
+./flash_bt_adb.sh --zip ~/Downloads/bt-fix-g0s_ExtremeKRNL-5.10.269.zip --mode dd
+```
+
+`flash_bt_adb.sh` handles both paths, extracts the image from the zip, backs up the current `vendor_boot` partition to `/data/local/tmp/vendor_boot.bak.img`, writes with `dd bs=4096`, and md5-checks the readback.
+
+**Rebuild the patch** (if a new kernel build lands):
+
+```bash
+# 1. unpack a vendor_boot that matches the target kernel, and extract its ramdisk01
+python3 unpack_bootimg.py --boot_img <vendor_boot.img> --out work/btpatch
+cd work/btpatch && lz4 -l -d -f vendor_ramdisk01 vr1.cpio && mkdir -p vr1 && cd vr1 \
+  && cpio -idm --quiet < ../vr1.cpio && cd ../../../..
+
+# 2. strip the modules that cannot load in first stage, repack, wrap
+python3 build_bt_patch.py
+python3 package_patch_zip.py --image work/btpatch_vendor_boot.img \
+  --out "~/Downloads/bt-fix-g0s_<tag>.zip" --kernel "<uname -r>"
+```
+
+`build_bt_patch.py` drops `dhd`, `fingerprint`, `fingerprint_sysfs`, `input_booster_lkm`, `sec_debug_coredump` from `modules.load`, rebuilds `vendor_boot.img` reusing the source dtb / bootconfig / `vendor_ramdisk00` untouched, and fails loudly if `bcm43xx` is no longer in the list.
+
+**If Bluetooth is still dead after flashing**, ordering was not the cause on your build — check, in this order:
+```bash
+adb shell 'dmesg | grep -iE "bcm43xx|bluetooth|rfkill"' | head -30
+adb shell 'ls -l /sys/class/rfkill/'
+adb shell 'lsmod | grep -E "bcm43xx|bluetooth"'
+adb shell 'dmesg | grep -iE "failed|not found" | head'
+```
+`bcm43xx` loaded but no rfkill device → the module is up and the failure is firmware/NVRAM under `/vendor/etc/bluetooth/` or `/vendor/firmware/`, which is a ROM-side file problem, not this patch.
+
+---
+
 ## 8. Current state of the code
 
 ### `.github/workflows/build.yml` — 10 steps, `master`, `timeout-minutes: 350`
