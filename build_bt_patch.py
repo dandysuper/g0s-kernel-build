@@ -1,31 +1,41 @@
 #!/usr/bin/env python3
-"""Build the Bluetooth-only patch: the stock vendor_boot with ONE line removed.
+"""Build the vendor_boot patch: Bluetooth + fingerprint, one partition, no kernel change.
 
-Measured against the real ExtremeKRNL release zip
-(ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip):
+Ground truth is the real release zip
+(ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip), whose vendor_ramdisk01
+carries a 319-entry modules.load:
 
-  * modules.load has 319 entries.
-  * `dhd` is entry 127.
-  * `bcm43xx` is entry 180.
-  * every other module that cannot load in first stage sits AFTER 180
-    (sec_debug_coredump 258, input_booster_lkm 270, fingerprint 276,
-     fingerprint_sysfs 277, s2dos05-regulator 282).
+    127  dhd                 <- fails here, /vendor not mounted yet
+    180  bcm43xx             <- Broadcom BT power/rfkill: NEVER REACHED
+    258  sec_debug_coredump
+    270  input_booster_lkm
+    276  fingerprint
+    277  fingerprint_sysfs   <- NEVER REACHED
+    282  s2dos05-regulator
 
-First-stage init loads that list in strict mode and aborts on the first
-failure. `dhd` cannot initialise before /vendor is mounted (its firmware lives
-there), so it fails at 127 and the remaining 192 entries are skipped --
-including `bcm43xx`, the Broadcom Bluetooth power/rfkill driver. That is the
-entire Bluetooth failure.
+Android first-stage init loads this list in **strict mode** and aborts the whole
+thing on the first module that fails. `dhd` cannot probe before /vendor is
+mounted because its firmware lives there, so it dies at 127 and entries 128-319
+are skipped. That single abort is why Bluetooth is dead AND why fingerprint
+enrolment never completes: `bcm43xx` and the two fingerprint modules are all
+downstream of it.
 
-Therefore the fix is: keep the stock list, delete `dhd`, keep the order of
-everything else. 318 entries, `bcm43xx` still at its original position, and
-`s2dos05-regulator` and the fingerprint/input-booster modules deliberately left
-in place even though they also cannot load early -- they are after bcm43xx, so
-they cost nothing for Bluetooth, and removing them would change more of the
-device than the patch needs to.
+The patch therefore does two things and nothing else:
 
-Only vendor_ramdisk01 inside vendor_boot.img changes. Kernel, dtbo,
-vendor_dlkm, the LineageOS fstab and encryption are all reused untouched.
+  1. delete `dhd` from the list, so loading no longer aborts at 127;
+  2. move `sec_debug_coredump` and `input_booster_lkm` to the tail.
+
+Step 2 matters because those two sit between `bcm43xx` (180) and `fingerprint`
+(276). If either one aborts once dhd is gone, fingerprint is skipped all over
+again. Moving them to the end costs nothing -- they are debug/booster modules
+that get their dependencies later anyway -- and it guarantees both payloads are
+reached before anything risky runs.
+
+Everything else keeps its exact original position, `s2dos05-regulator` included
+(it is a PMIC regulator and there is no reason to touch it).
+
+Only vendor_ramdisk01 inside vendor_boot.img changes. The kernel, dtbo,
+vendor_dlkm, the LineageOS fstab and encryption are reused byte-identically.
 """
 
 import os
@@ -39,11 +49,15 @@ VR1 = os.path.join(SRC, "x")                        # extracted vendor_ramdisk01
 STAGE = os.path.join(BASE, "work", "btmin_stage")
 OUT_IMG = os.path.join(BASE, "work", "btmin_vendor_boot.img")
 
-# The single entry to drop. Everything after it stays exactly where it was.
+# Confirmed failure: dhd cannot probe before /vendor is mounted.
 DROP = {"dhd"}
 
-# Must survive the edit -- if this disappears the patch has no purpose.
-REQUIRED = "bcm43xx"
+# Sits between bcm43xx and fingerprint. Delayed rather than deleted so they
+# cannot abort the list before the modules we actually need are reached.
+DEFER_TO_END = {"sec_debug_coredump", "input_booster_lkm"}
+
+# If any of these disappear the patch has no purpose.
+REQUIRED = ("bcm43xx", "fingerprint", "fingerprint_sysfs")
 
 
 def run(cmd):
@@ -55,45 +69,59 @@ def run(cmd):
     return proc.stdout
 
 
+def stem(name):
+    """modules.load mixes `foo` and `foo.ko`; compare on the stem."""
+    return name[:-3] if name.endswith(".ko") else name
+
+
 def main():
     for path in (SRC, VR1):
         if not os.path.isdir(path):
             raise SystemExit("missing %s -- unpack the stock vendor_boot first" % path)
 
     load_path = os.path.join(VR1, "lib", "modules", "modules.load")
-    with open(load_path) as handle:
-        raw = [line.rstrip("\n") for line in handle]
-    raw = [line for line in raw if line.strip()]
+    if not os.path.isfile(load_path):
+        raise SystemExit("missing %s" % load_path)
 
-    # The stock list writes names with a .ko suffix; compare on the stem so the
-    # drop list is readable, then write the original spelling back unchanged.
-    def stem(name):
-        return name[:-3] if name.endswith(".ko") else name
+    with open(load_path) as handle:
+        raw = [line.rstrip("\n") for line in handle if line.strip()]
 
     before = [stem(n) for n in raw]
-    if REQUIRED not in before:
-        raise SystemExit("%s missing from the stock list -- wrong source tree" % REQUIRED)
+    for name in REQUIRED:
+        if name not in before:
+            raise SystemExit("%s missing from the stock list -- wrong source tree" % name)
 
-    kept = [n for n in raw if stem(n) not in DROP]
     dropped = [n for n in raw if stem(n) in DROP]
+    if not dropped:
+        raise SystemExit("nothing to drop -- is this already patched?")
+
+    body = [n for n in raw if stem(n) not in DROP]
+    deferred = [n for n in body if stem(n) in DEFER_TO_END]
+    body = [n for n in body if stem(n) not in DEFER_TO_END]
+    kept = body + deferred
+
+    after = [stem(n) for n in kept]
 
     print("stock entries        : %d" % len(raw))
-    print("dropping             : %s" % (", ".join(dropped) if dropped else "(none)"))
-    print("kept                 : %d" % len(kept))
-    print("%-20s : stock %d, patched %d" % (
-        REQUIRED,
-        before.index(REQUIRED) + 1,
-        [stem(n) for n in kept].index(REQUIRED) + 1,
-    ))
+    print("dropping             : %s" % ", ".join(dropped))
+    print("deferred to tail     : %s" % (", ".join(deferred) if deferred else "(none)"))
+    print("patched entries      : %d" % len(kept))
 
-    # Nothing that loads before bcm43xx may be removed, or the patch is wrong.
-    if not dropped:
-        raise SystemExit("nothing was dropped -- already patched?")
-    bc = before.index(REQUIRED) + 1
-    for name in dropped:
-        pos = before.index(stem(name)) + 1
-        if pos < bc:
-            print("  note: %s was at %d, before %s at %d" % (name, pos, REQUIRED, bc))
+    for name in REQUIRED:
+        src = before.index(name) + 1
+        dst = after.index(name) + 1
+        print("  %-18s %3d -> %3d" % (name, src, dst))
+        if dst > len(body):
+            raise SystemExit("%s ended up inside the deferred tail" % name)
+
+    # Every module we need must now sit before the deferred block, or a failure
+    # in that block could still skip it.
+    last_required = max(after.index(n) for n in REQUIRED)
+    if deferred and last_required >= len(body):
+        raise SystemExit("required modules are not ahead of the deferred tail")
+
+    print("  highest required index: %d of %d (tail starts at %d)"
+          % (last_required + 1, len(kept), len(body) + 1))
 
     if os.path.isdir(STAGE):
         shutil.rmtree(STAGE)
@@ -107,7 +135,8 @@ def main():
     run([sys.executable, os.path.join(BASE, "make_cpio.py"), STAGE, cpio_path])
     run(["lz4", "-l", "-12", "--favor-decSpeed", "-f", cpio_path, lz4_path])
     print("vendor_ramdisk01     : %d bytes (stock %d)" % (
-        os.path.getsize(lz4_path), os.path.getsize(os.path.join(SRC, "vendor_ramdisk01"))))
+        os.path.getsize(lz4_path),
+        os.path.getsize(os.path.join(SRC, "vendor_ramdisk01"))))
 
     run([
         sys.executable, os.path.join(BASE, "mkbootimg.py"),

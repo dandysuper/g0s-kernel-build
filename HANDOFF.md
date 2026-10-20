@@ -225,59 +225,77 @@ Everything checkable without the phone has been checked. **What remains is a phy
 
 ---
 
-## 7b. Bluetooth-only patch (standalone, flashes one partition)
+## 7b. Bluetooth + fingerprint patch (standalone, flashes one partition)
 
-Built on request: a zip that fixes Bluetooth **without touching the kernel, dtbo or vendor_dlkm**.
+Built on request: a zip that fixes **Bluetooth and fingerprint** without touching the kernel, dtbo or vendor_dlkm.
 
-**Root cause, measured against the real release zip** (`ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip`), not against a copy:
+**Both failures are the same bug.** Measured against the real release zip (`ExtremeKRNL-v2.5_g0s_AOSP_KSU_05-10-2026_03-11-33.zip`), whose ramdisk carries a 319-entry `modules.load`:
 
 ```
-modules.load: 319 entries
-  dhd        entry 127   <-- fails here, /vendor not mounted yet
-  bcm43xx    entry 180   <-- never reached
-  everything else that cannot load early sits AFTER 180:
-    sec_debug_coredump 258, input_booster_lkm 270,
-    fingerprint 276, fingerprint_sysfs 277, s2dos05-regulator 282
+entry  module                  consequence
+ 127   dhd                     fails here -- /vendor not mounted yet
+ 180   bcm43xx                 Broadcom BT power/rfkill   NEVER REACHED
+ 258   sec_debug_coredump      sits between the two fixes
+ 270   input_booster_lkm       sits between the two fixes
+ 276   fingerprint             sensor driver              NEVER REACHED
+ 277   fingerprint_sysfs       its dependency             NEVER REACHED
+ 282   s2dos05-regulator       PMIC regulator, harmless
 ```
 
-First-stage init loads that list in **strict mode** and aborts on the first failure. `dhd.ko` cannot initialise before `/vendor` is mounted — its firmware lives there — so it fails at 127 and the remaining 192 entries, `bcm43xx.ko` among them, are skipped. `bcm43xx` is the Broadcom Bluetooth power/rfkill driver, which is why Bluetooth is dead while mobile data works.
+Android first-stage init loads that list in **strict mode** and aborts the entire remainder on the first failure. `dhd.ko` cannot probe before `/vendor` is mounted — its firmware lives there — so it dies at 127 and entries 128–319 are skipped. That single abort is why Bluetooth is dead *and* why fingerprint enrolment never completes: `bcm43xx` and both fingerprint modules are downstream of it.
 
-**The fix is one line.** Keep the stock list, delete `dhd.ko`, leave every other entry in position. `bcm43xx` moves 180 → 179 and loads. The entries after it are deliberately kept even though they also cannot load early: they come *after* `bcm43xx`, so they cost Bluetooth nothing, and removing them would change more of the device than necessary. (An earlier iteration removed six entries including `s2dos05-regulator` — that was wrong and has been reverted; this patch is strictly minimal.)
+**The patch does two things:**
 
-**Proof it is minimal** — diff of the repacked ramdisk against stock:
+1. **delete `dhd`** — loading no longer aborts at 127;
+2. **move `sec_debug_coredump` and `input_booster_lkm` to the tail** — they sit between `bcm43xx` (180) and `fingerprint` (276), so if either aborted once `dhd` was gone, fingerprint would be skipped all over again. Deferring them costs nothing (they are debug/booster modules that get their dependencies later) and guarantees both payloads are reached first.
+
+Everything else keeps its original position, including `s2dos05-regulator` — no reason to touch a PMIC regulator.
+
+**Proof — the complete diff against stock:**
 
 ```
 $ diff stock/modules.load patched/modules.load
 127d126
 < dhd.ko
+258d256
+< sec_debug_coredump.ko
+270d267
+< input_booster_lkm.ko
+319a317,318
+> sec_debug_coredump.ko
+> input_booster_lkm.ko
 ```
 
-One line, nothing else. The other image inputs are **byte-identical**: `dtb` (369,404 B), `bootconfig` (28 B), `vendor_ramdisk00` (211,300 B — the LineageOS fstab and init binaries). A full-tree `diff -rq` reports only `modules.load` differing; `dhd.ko` was never a file in this ramdisk (it lives in `vendor_dlkm`), so no module file was removed.
+Resulting positions: `bcm43xx` 179, `fingerprint` 273, `fingerprint_sysfs` 274, deferred block 317–318, 318 entries total. Both fixes sit well ahead of anything that might abort.
 
-**The artifact:** `~/Downloads/bt-fix-BLUETOOTH-ONLY-g0s.zip` (12,671,223 bytes)
+The other image inputs are **byte-identical**: `dtb` (369,404 B), `bootconfig` (28 B), `vendor_ramdisk00` (211,300 B — the LineageOS fstab and init binaries). `dhd.ko` was never a file in this ramdisk (it lives in `vendor_dlkm`), so no module file was removed.
+
+**The artifact:** `~/Downloads/fix-BT-FINGERPRINT-g0s.zip` (12,671,228 bytes)
 
 | Check | Result |
 |---|---|
 | zip integrity | `No errors detected in compressed data` |
 | files in zip | `updater-script`, `update-binary`, `files/vendor_boot.img` — nothing else |
 | `package_extract_file` calls | **1**, targeting `/dev/block/by-name/vendor_boot` |
-| `modules.load` | 318 entries (319 − `dhd.ko`) |
+| `modules.load` | 318 entries |
 | `dhd` present | no |
 | `bcm43xx` | line 179 |
+| `fingerprint` / `fingerprint_sysfs` | lines 273 / 274 |
 | built for kernel | `5.10.269-ExtremeKRNL-v2.5+` |
-| `vendor_boot.img` | 15,931,392 B (stock 21,141,504 — smaller only because the cpio is repacked without slack) |
 
 **Flash it:**
 
 ```bash
 # recovery: reboot to recovery, "Apply update from ADB", then
-adb sideload ~/Downloads/bt-fix-BLUETOOTH-ONLY-g0s.zip
+adb sideload ~/Downloads/fix-BT-FINGERPRINT-g0s.zip
 
 # or no recovery, rooted device (KernelSU):
-./flash_bt_adb.sh --zip ~/Downloads/bt-fix-BLUETOOTH-ONLY-g0s.zip --mode dd
+./flash_bt_adb.sh --zip ~/Downloads/fix-BT-FINGERPRINT-g0s.zip --mode dd
 ```
 
 `flash_bt_adb.sh` handles both paths, pulls the image out of the zip, backs up the current `vendor_boot` partition to `/data/local/tmp/vendor_boot.bak.img`, writes with `dd bs=4096`, and md5-checks the readback.
+
+**Note on the fingerprint symptom.** "Doesn't finish registering" is exactly what a missing sensor driver looks like: the Settings enrolment UI opens, the HAL cannot talk to the sensor, and the flow times out at the last step rather than failing outright. If enrolment still fails after this flash, the driver is up and the remaining suspect is the calibration/NVRAM data under `/vendor/etc/fingerprint/`, which is a ROM-side file problem rather than the module list.
 
 This patch is built for the **`5.10.269-ExtremeKRNL-v2.5+`** kernel, which is what the release zip installs. If the device is ever moved to the newer `5.10.260-g0d060df61c11-dirty` kernel, rebuild against that kernel's `vendor_boot.img` (`out/vendor_boot.img`) — the modules inside `vendor_ramdisk01` must match the running kernel or nothing loads.
 
@@ -295,17 +313,25 @@ python3 unpack_bootimg.py --boot_img work/btorig/files/vendor_boot.img --out wor
 cd work/btorig/u && lz4 -l -d -f vendor_ramdisk01 r.cpio \
   && mkdir -p x && cd x && cpio -idm --quiet < ../r.cpio && cd ../../../..
 
-# 3. drop dhd.ko only, repack, wrap
+# 3. drop dhd.ko, defer the two blockers, repack, wrap
 python3 build_bt_patch.py
 python3 package_patch_zip.py --image work/btmin_vendor_boot.img \
-  --out "~/Downloads/bt-fix-BLUETOOTH-ONLY-g0s.zip" --kernel "5.10.269-ExtremeKRNL-v2.5+"
+  --out "~/Downloads/fix-BT-FINGERPRINT-g0s.zip" --kernel "5.10.269-ExtremeKRNL-v2.5+"
 ```
 
-`build_bt_patch.py` removes only `dhd` from `modules.load` (constant `DROP`), refuses to build if `bcm43xx` is missing from the source list, warns if anything dropped sat before `bcm43xx`, and rebuilds `vendor_boot.img` reusing the source `dtb` / `bootconfig` / `vendor_ramdisk00` untouched. Verify the rebuild with:
+`build_bt_patch.py` is driven by two constants:
+
+| constant | value | effect |
+|---|---|---|
+| `DROP` | `{"dhd"}` | removes the module that aborts the list at 127 |
+| `DEFER_TO_END` | `{"sec_debug_coredump", "input_booster_lkm"}` | moves the two modules that sit between `bcm43xx` and `fingerprint` to the tail |
+| `REQUIRED` | `bcm43xx`, `fingerprint`, `fingerprint_sysfs` | build fails if any is missing, or if any ends up inside the deferred tail |
+
+It rebuilds `vendor_boot.img` reusing the source `dtb` / `bootconfig` / `vendor_ramdisk00` untouched. Verify the rebuild with:
 
 ```bash
-diff work/btorig/u/x/lib/modules/modules.load <patched>/lib/modules/modules.load
-# expected: exactly "127d126" and "< dhd.ko"
+diff work/btorig/u/x/lib/modules/modules.load work/btv/u/x/lib/modules/modules.load
+# expected: 127d126, 258d256, 270d267, 319a317,318
 ```
 
 **If Bluetooth is still dead after flashing**, ordering was not the cause on your build — check, in this order:
