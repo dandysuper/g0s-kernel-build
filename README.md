@@ -138,16 +138,19 @@ post-boot FOD/permission verification. The script infers its stage from its
 installed path. Duplicate successful invocations in the same stage are skipped;
 failed repairs remain retryable. There is no global “already ran” guard.
 
-**For a separately authorized installation (not performed by this repository
-change):** back up all existing stage copies outside the startup directories
-first, including a `boot-completed.d` copy if present. Then deploy the same version
-to all three paths; do not mix old and new copies (the old script ignores locks).
+**For any future installation:** follow the [validated deployment and recovery
+record](docs/boot-cleanup-deployment.md). Verify the single intended device,
+root shell, current scripts and required tools first. Back up all existing stage
+copies on both host and phone, outside startup directories, including a
+`boot-completed.d` copy if present; verify hashes and ownership/mode/SELinux label.
+Stage and syntax/hash-check **all** replacements before using atomic renames on
+the same filesystem while no loader is running. Preserve metadata and retain a
+verified rollback. Do not overwrite active files with a partial direct push or
+mix old/new copies (the old script ignores locks).
 
-```bash
-adb push load_drivers.sh /data/local/tmp/load_drivers.sh
-adb shell "su -c 'mkdir -p /data/adb/post-fs-data.d /data/adb/service.d /data/adb/boot-completed.d'"
-adb shell "su -c 'cp /data/local/tmp/load_drivers.sh /data/adb/post-fs-data.d/load_drivers.sh && cp /data/local/tmp/load_drivers.sh /data/adb/service.d/load_drivers.sh && cp /data/local/tmp/load_drivers.sh /data/adb/boot-completed.d/load_drivers.sh && chmod 0755 /data/adb/post-fs-data.d/load_drivers.sh /data/adb/service.d/load_drivers.sh /data/adb/boot-completed.d/load_drivers.sh'"
-```
+The recorded phone installation retains its exact older tuning block rather
+than silently installing the repository's later tuning changes. Its deterministic
+variant derivation, tests and installed hash are documented in that record.
 
 The loader requires Android `/system/bin/flock` with `-n` and FD locking,
 `pgrep`, and `pkill`, plus the existing module tools and KernelSU `ksud`.
@@ -158,8 +161,13 @@ leaves hardware untouched and is retried by a later stage/manual invocation.
 For an explicitly authorized live repair, use the late stage, not the early path:
 
 ```bash
-adb shell "su -c 'sh /data/adb/service.d/load_drivers.sh'"
+# Assumes adb shell id confirms an already-root shell, as on the recorded phone.
+adb shell /system/bin/sh /data/adb/service.d/load_drivers.sh
 ```
+
+Do not run this merely to validate file installation: it performs live hardware
+repairs. On a non-root ADB shell use the separately authorized root mechanism;
+`su` is not present on every rooted setup.
 
 This does **not** force Wi-Fi on. It preserves driver and HAL recovery without
 overriding an intentional off choice. Enable Wi-Fi in Settings if desired.

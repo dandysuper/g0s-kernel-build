@@ -93,10 +93,12 @@ for i in 1 2 3 4 5; do
     sleep 0.1
 done
 fi
-if [ -e /dev/qbt2000_fd ] && [ -e /dev/qbt2000_ipc ]; then
+if [ -e /dev/qbt2000_fd ] || [ -e /dev/qbt2000_ipc ]; then
     /system/bin/chown system:system /dev/qbt2000* 2>/dev/null || REPAIRS_OK=0
     /system/bin/chmod 0660 /dev/qbt2000* 2>/dev/null || REPAIRS_OK=0
-else
+fi
+# Repair available nodes immediately, but do not cache partial readiness.
+if [ ! -e /dev/qbt2000_fd ] || [ ! -e /dev/qbt2000_ipc ]; then
     REPAIRS_OK=0
 fi
 
