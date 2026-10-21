@@ -239,126 +239,78 @@ jobs:
 
       - name: Build kernel image and modules
         run: |
-          set -e
           cd kernel
-          export ARCH=arm64
           export PATH="$PWD/../clang-prebuilt/bin:$PATH"
           MAKE_ARGS=(O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-)
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image modules
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" \
+            INSTALL_MOD_PATH="$PWD/../modules_out" modules_install
           ls -lh out/arch/arm64/boot/Image
 
-      - name: Build modules
+      - name: Strip and verify every module
         run: |
-          set -e
-          cd kernel
-          export ARCH=arm64
-          export PATH="$PWD/../clang-prebuilt/bin:$PATH"
-          MAKE_ARGS=(O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-)
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" modules
-          rm -rf ../modules_out
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" \
-            INSTALL_MOD_PATH="$PWD/../modules_out" \
-            modules_install
-
-          # INSTALL_MOD_STRIP=1 does nothing useful here: with STRIP=llvm-strip
-          # the kernel build passes the value through as a strip argument, and
-          # modules came out of modules_install at full size - measured
-          # 113,854,768 bytes, identical to unstripped. Strip explicitly.
-          # --strip-debug removes only DWARF and leaves .symtab and the .modinfo
-          # vermagic section alone, so module loading is unaffected.
-          find ../modules_out -name '*.ko' -print0 \
-            | xargs -0 -r llvm-strip --strip-debug
-
-          MCOUNT=$(find ../modules_out -name '*.ko' | wc -l)
-          MBYTES=$(find ../modules_out -name '*.ko' -printf '%s\n' | awk '{s+=$1} END {print s}')
-          DHD=$(find ../modules_out -name 'dhd.ko' | head -1)
-          echo "modules: $MCOUNT"
-          echo "bytes:   $MBYTES"
-          echo "dhd.ko:  $(stat -c%s "$DHD") bytes"
-          echo "vermagic in dhd.ko: $(strings "$DHD" | grep -c '^vermagic=')"
-
-          # The stock module set is 57 MB here and compresses to 19,079,168
-          # bytes. Anything near double that will not fit the 19,685,376-byte
-          # vendor_dlkm partition, so fail now rather than during repack.
-          if [ "$MBYTES" -gt 70000000 ]; then
-            echo "FATAL: stripped modules still $MBYTES bytes - will not fit vendor_dlkm"
+          # Explicitly strip DWARF, retaining .symtab, CRCs and vermagic.
+          find modules_out -name '*.ko' -print0 | xargs -0 -r llvm-strip --strip-debug
+          python3 repack.py --image kernel/out/arch/arm64/boot/Image \
+            --modules modules_out/lib/modules --verify-only
+          # Conservative ceiling above the known-fitting ~57 MB module set.
+          # The exact compressed partition limit is still enforced by repack.py.
+          MODULE_BYTES=$(find modules_out -type f -name '*.ko' -printf '%s\n' | awk '{bytes+=$1} END {printf "%.0f", bytes}')
+          if [ "$MODULE_BYTES" -gt 70000000 ]; then
+            echo "FATAL: stripped modules grew to $MODULE_BYTES bytes; investigate before repacking"
             exit 1
           fi
+          ccache --show-stats
 
-      - name: Verify vermagic and required modules
+      - name: Package artifacts with provenance and checksums
         run: |
-          set -e
-          cd kernel
-          echo "kernelversion: $(make kernelversion)"
-
-          # The kernel and every module must agree exactly, or the ROM refuses to
-          # load the module set at boot and the device comes up with no Wi-Fi.
-          KVM=$(strings out/arch/arm64/boot/Image | grep -m1 -E "^5\.10\.[0-9]+")
-          SAMPLE=$(find ../modules_out -name '*.ko' | head -1)
-          MVM=$(strings "$SAMPLE" | sed -n 's/^vermagic=//p' | head -1)
-          echo "kernel vermagic : $KVM"
-          echo "module vermagic : $MVM   ($SAMPLE)"
-
-          [ -n "$KVM" ] || { echo "FATAL: no vermagic in Image"; exit 1; }
-          [ -n "$MVM" ] || { echo "FATAL: no vermagic in $SAMPLE"; exit 1; }
-
-          # The Image carries the bare release (5.10.260-g<hash>[-dirty]) while a
-          # module carries that release followed by its flags
-          # ("... SMP preempt mod_unload modversions aarch64"). Equality is the
-          # wrong comparison - the module string must START WITH the release.
-          case "$MVM" in
-            "$KVM"*) echo "vermagic OK - module vermagic is prefixed by the kernel release" ;;
-            *) echo "FATAL: vermagic mismatch - kernel '$KVM' is not a prefix of module '$MVM'"; exit 1 ;;
-          esac
-
-          for m in dhd.ko cfg80211.ko bcm43xx.ko; do
-            path=$(find ../modules_out -name "$m" | head -1)
-            if [ -z "$path" ]; then
-              echo "FATAL: required module $m missing from the build"; exit 1
-            fi
-            echo "present: $m  ($(stat -c%s "$path") bytes)"
-          done
-
-      - name: Package artifacts
-        run: |
-          set -e
-          cd kernel
-          mkdir -p ../artifact
-          cp out/arch/arm64/boot/Image ../artifact/Image
-          tar -C ../modules_out -czf ../artifact/modules.tar.gz .
-          cd ../artifact
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/.config artifact/kernel.config
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+            -C modules_out -cf - . | gzip -n > artifact/modules.tar.gz
+          {
+            echo "builder_commit=$(git rev-parse HEAD)"
+            echo "kernel_commit=$(git -C kernel rev-parse HEAD)"
+            echo "kernelsu_commit=$(git -C kernel/KernelSU-Next rev-parse HEAD)"
+            echo "clang_commit=$(git -C clang-prebuilt rev-parse HEAD)"
+            echo "kernel_release=$(cat kernel/out/include/config/kernel.release)"
+            echo "source_date_epoch=$SOURCE_DATE_EPOCH"
+            clang --version
+          } > artifact/build-info.txt
+          cd artifact
+          sha256sum Image modules.tar.gz kernel.config build-info.txt > SHA256SUMS
+          sha256sum --check SHA256SUMS
           ls -lh
-          echo "$(date -u +%Y%m%d-%H%M)" > build-stamp.txt
 
       # Artifact storage is quota-limited account-wide and that quota is spent,
       # so upload-artifact fails with "Artifact storage quota has been hit".
-      # Release assets are metered separately, so the build publishes itself as
-      # a release instead. Tag carries the build timestamp so every build lands
-      # without clobbering the previous one.
-      - name: Publish build as a release
+      # Release assets are metered separately. Run IDs avoid same-minute tag
+      # collisions, and prerelease status does not imply device validation.
+      - name: Publish build as a prerelease
         run: |
-          set -e
-          TAG="build-$(date -u +%Y%m%d-%H%M)"
-          NOTES="$PWD/artifact/release-notes.md"
+          TAG="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          NOTES="$RUNNER_TEMP/release-notes.md"
           {
-            echo "LineageOS 24.0 / Android 17 kernel for g0s (Galaxy S22)."
+            echo "LineageOS 24.0 / Android 17 build target: g0s (Galaxy S22+, SM-S906B)."
             echo ""
             echo "- kernel: $VERSION"
-            echo "- KernelSU Next: enabled"
+            echo "- KernelSU Next: pinned UAPI 6 commit $KSU_REF"
             echo "- BCM4389 Wi-Fi (BCMDHD_PCIE) + BCM BT (BCM43XX): enabled"
             echo "- r11s wireless: rejected by config gate"
-            echo "- CONFIG_CMUCAL_DEBUG disabled: fix for the cmupmucal.ko"
-            echo "  undefined cmucal_dbg_set_cmu_*_base / vclk_debug_init symbols"
+            echo "- KASAN/debug-info overhead disabled; Android PSI/cgroup/uclamp features retained"
+            echo "- Every module checked for exact release, ABI flags and dependency coverage"
             echo ""
-            echo "Assets:"
-            echo "- Image: raw arm64 kernel"
-            echo "- modules.tar.gz: lib/modules tree from modules_install"
+            echo "Build artifacts only, not a flashable package. Repack using matched ROM inputs."
+            echo "Android 17 boot, encryption, hardware, thermals and performance require real-device testing."
+            echo ""
+            echo "Assets: Image, modules.tar.gz, kernel.config, build-info.txt, SHA256SUMS."
           } > "$NOTES"
-          echo "Published tag: $TAG"
           gh release create "$TAG" \
-            artifact/Image \
-            artifact/modules.tar.gz \
+            artifact/Image artifact/modules.tar.gz artifact/kernel.config \
+            artifact/build-info.txt artifact/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease \
             --title "g0s kernel $TAG" \
             --notes-file "$NOTES"
         env:

@@ -25,7 +25,7 @@ if ! /system/bin/flock -n 9 9>&9; then
     echo "Loader lock busy or /system/bin/flock unavailable ($STAGE)."
     [ "$STAGE" = early ] && exit 0
     LOCKED=0
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    for _attempt in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.1
         if /system/bin/flock -n 9 9>&9; then LOCKED=1; break; fi
     done
@@ -96,7 +96,7 @@ if [ ! -f "$STATE/$STAGE.repairs" ]; then
 REPAIRS_OK=1
 # 3. Fix /dev/qbt2000* permissions (late stages only wait briefly for nodes)
 if [ "$STAGE" != early ]; then
-for i in 1 2 3 4 5; do
+for _attempt in 1 2 3 4 5; do
     if [ -e /dev/qbt2000_fd ] && [ -e /dev/qbt2000_ipc ]; then
         break
     fi

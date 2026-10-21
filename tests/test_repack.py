@@ -1,6 +1,7 @@
 import contextlib
 import io
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -214,6 +215,39 @@ class RepackTests(unittest.TestCase):
                     self.erofs(size, output, code)
                 self.assertEqual(output.read_bytes(), b"known-good")
                 self.assertEqual(list(self.root.glob(".vendor-dlkm-*")), [])
+
+    @unittest.skipUnless(shutil.which("lz4") and shutil.which("cpio"), "LZ4/cpio unavailable")
+    def test_ramdisk_fragment_uses_legacy_lz4_and_extractable_newc(self):
+        archive = self.root / "fragment.cpio"
+        compressed = self.root / "fragment.lz4"
+        repack.build_ramdisk_fragment(self.modules / "kernel/drivers", self.early, str(archive), str(compressed))
+        with compressed.open("rb") as source:
+            self.assertEqual(source.read(4), b"\x02\x21\x4c\x18")
+        decoded = subprocess.run(["lz4", "-dc", str(compressed)], check=True, capture_output=True, timeout=10).stdout
+        self.assertEqual(decoded, archive.read_bytes())
+        extracted = self.root / "ramdisk-extracted"
+        extracted.mkdir()
+        subprocess.run(["cpio", "-id", "--quiet", "--no-absolute-filenames"],
+                       input=decoded, cwd=extracted, check=True, capture_output=True, timeout=10)
+        self.assertEqual((extracted / "lib/modules/modules.load").read_bytes(), self.early.read_bytes())
+        self.assertEqual((extracted / "lib/modules/dhd.ko").read_bytes(),
+                         (self.modules / "kernel/drivers/dhd.ko").read_bytes())
+
+    @unittest.skipUnless(shutil.which("mkfs.erofs") and shutil.which("fsck.erofs"), "EROFS tools unavailable")
+    def test_real_erofs_fits_partition_and_preserves_late_module_metadata(self):
+        output = self.root / "vendor_dlkm.img"
+        repack.build_vendor_dlkm(self.modules / "kernel/drivers", self.late, self.dep, str(output))
+        self.assertEqual(output.stat().st_size, repack.VENDOR_DLKM_SIZE)
+        extracted = self.root / "erofs-extracted"
+        subprocess.run(["fsck.erofs", "--extract=" + str(extracted), str(output)],
+                       check=True, capture_output=True, timeout=15)
+        modules = extracted / "lib/modules"
+        self.assertEqual((modules / "modules.load").read_bytes(), self.late.read_bytes())
+        self.assertEqual({path.name for path in modules.glob("*.ko")}, set(MODULES))
+        self.assertIn("/vendor_dlkm/lib/modules/dhd.ko: /vendor_dlkm/lib/modules/cfg80211.ko",
+                      (modules / "modules.dep").read_text())
+        for name in MODULES:
+            self.assertEqual((modules / name).read_bytes(), (self.modules / "kernel/drivers" / name).read_bytes())
 
     def package_inputs(self):
         binary = self.work / "ek/META-INF/com/google/android/update-binary"

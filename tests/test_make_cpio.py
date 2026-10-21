@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -121,6 +122,24 @@ class CpioTests(unittest.TestCase):
             self.archive()
         self.assertEqual(self.output.read_bytes(), b"known-good")
         self.assertEqual(list(self.root.glob(".ramdisk-*")), [])
+
+    @unittest.skipUnless(shutil.which("cpio"), "system cpio unavailable")
+    def test_system_cpio_extracts_files_modes_and_symlinks(self):
+        directory = self.source / "lib/modules"
+        directory.mkdir(parents=True)
+        (directory / "driver.ko").write_bytes(b"\x00module-data\xff")
+        script = self.source / "init"
+        script.write_bytes(b"#!/system/bin/sh\n")
+        script.chmod(0o755)
+        (self.source / "driver-link").symlink_to("lib/modules/driver.ko")
+        self.archive()
+        extracted = self.root / "extracted"
+        extracted.mkdir()
+        subprocess.run(["cpio", "-id", "--quiet", "--no-absolute-filenames"],
+                       input=self.output.read_bytes(), cwd=extracted, check=True, capture_output=True, timeout=10)
+        self.assertEqual((extracted / "lib/modules/driver.ko").read_bytes(), b"\x00module-data\xff")
+        self.assertEqual(stat.S_IMODE((extracted / "init").stat().st_mode), 0o755)
+        self.assertEqual(os.readlink(extracted / "driver-link"), "lib/modules/driver.ko")
 
     def test_newc_field_overflow_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "exceeds 32 bits"):
