@@ -19,13 +19,15 @@ mkdir -p "$STATE" || exit 1
 # FD locks are released on exit/crash and reboot: a leftover file is harmless.
 # No PID lock stealing (PID reuse and publication races can admit two owners).
 exec 9>"$STATE/lock" || exit 1
-if ! /system/bin/flock -n 9; then
+# Android mksh needs an explicit inherited redirection for external flock;
+# KernelSU BusyBox ash accepts it too. Keep the same open FD for the whole run.
+if ! /system/bin/flock -n 9 9>&9; then
     echo "Loader lock busy or /system/bin/flock unavailable ($STAGE)."
     [ "$STAGE" = early ] && exit 0
     LOCKED=0
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.1
-        if /system/bin/flock -n 9; then LOCKED=1; break; fi
+        if /system/bin/flock -n 9 9>&9; then LOCKED=1; break; fi
     done
     if [ "$LOCKED" != 1 ]; then
         echo "Loader busy or flock unavailable; retry at a later stage/manual run."

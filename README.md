@@ -148,12 +148,16 @@ the same filesystem while no loader is running. Preserve metadata and retain a
 verified rollback. Do not overwrite active files with a partial direct push or
 mix old/new copies (the old script ignores locks).
 
-The recorded phone installation retains its exact older tuning block rather
-than silently installing the repository's later tuning changes. Its deterministic
-variant derivation, tests and installed hash are documented in that record.
+The initial phone installation retained its exact older tuning block. The user
+subsequently authorized PR #1 conservative tuning; the linked record separates
+the initial variant from the follow-up canonical-script deployment and hashes.
 
 The loader requires Android `/system/bin/flock` with `-n` and FD locking,
 `pgrep`, and `pkill`, plus the existing module tools and KernelSU `ksud`.
+Both lock calls explicitly inherit FD 9 (`9>&9`), required by Android mksh and
+compatible with KernelSU ash. Validate locking, not only shell syntax; the
+opt-in `tests/probe_android_lock.sh` checks both Android shells using only a new
+backup-directory lock, never the loader or hardware repairs.
 Verify those tools on the target before installation. Early boot does not wait
 for the lock or for Android; late contention is bounded. Failed lock acquisition
 leaves hardware untouched and is retried by a later stage/manual invocation.

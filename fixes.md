@@ -81,8 +81,9 @@ already be mounted.
   SELinux label, FOD enable and `set_fod_rect,426,1675,654,1903`, and deletion of
   both incompatible fingerprint properties.
 - **Deduplication/retry:** A boot-ID-scoped state directory and
-  `/system/bin/flock -n 9` serialize all stages. Successful repairs are recorded
-  separately per stage; missing nodes, failed commands, or a non-OK FOD result
+  `/system/bin/flock -n 9 9>&9` serialize all stages. Explicit FD inheritance
+  is required by Android mksh and also works under KernelSU BusyBox ash.
+  Successful repairs are recorded separately per stage; missing nodes, failed commands, or a non-OK FOD result
   leave that stage retryable. Driver presence is always rechecked, even after
   a stage succeeded. Late lock acquisition is bounded to ten 0.1-second retries.
   If locking is unavailable, no unprotected hardware actions run.

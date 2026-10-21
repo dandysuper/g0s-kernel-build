@@ -173,6 +173,14 @@ class LoadDriversTests(unittest.TestCase):
         self.android = AndroidSandbox(self.source)
         self.addCleanup(self.android.close)
 
+    def test_lock_fd_is_explicitly_inherited_by_android_flock(self):
+        # Android mksh closes exec-created FDs in external commands unless they
+        # are explicitly redirected. Host /bin/sh does not expose this bug.
+        calls = re.findall(r"/system/bin/flock -n 9[^;\n]*", self.source)
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertRegex(call, r"-n 9\s+9>&9(?:\s|$)")
+
     def test_sequential_repeats_deduplicate_repairs_and_tuning(self):
         a = self.android
         a.run()

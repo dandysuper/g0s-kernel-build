@@ -23,7 +23,11 @@ The Wi-Fi enable watchdog is deliberately removed: a disabled state does not
 prove failure and must not override intentional Wi-Fi off. Driver/HAL recovery
 remains. This is not a claim of improved battery life or measured boot timing.
 
-## Host regression results
+## Initial host regression results (29-test suite at `df27f435`)
+
+The commands/results in this section and the initial-variant section below are
+historical: use the matching `df27f435` harness to reproduce their counts. The
+current 30-test suite adds FD-inheritance coverage described in the follow-up.
 
 The harness redirects Android filesystem paths into temporary directories and
 mocks privileged commands. Only the host's ordinary kernel FD-lock operation
@@ -52,7 +56,11 @@ arguments, patched/stock selection and unchanged repository tuning values.
 
 These are host-shell mocks, not Android firmware or hardware emulation.
 
-## Authorized phone installation
+## Initial phone installation (historical)
+
+This section records the first installation at PR head `df27f435`. The later
+FD-inheritance correction and separately authorized PR #1 tuning deployment are
+recorded below; do not treat these historical hashes as the latest script.
 
 The connected SM-S906B / `g0s` was verified as the single ADB target, with root
 ADB shell and SELinux Enforcing. Its three installed copies (including
@@ -69,7 +77,8 @@ the entire current repository script.
 
 ### Deterministic variant derivation
 
-Run from this cleanup revision; choose an output outside startup directories:
+Reproduce the initial deployment from its immutable cleanup revision, not from
+the latest source; choose an output outside startup directories:
 
 ```python
 from pathlib import Path
@@ -80,7 +89,9 @@ old = subprocess.check_output(["git", "show", "1da0644:load_drivers.sh"]).decode
 assert hashlib.sha256(old.encode()).hexdigest() == (
     "5f75f1374b244b98c9e6ceeb5b0a217e981c6765a5b6a53aeb0153bd24fd4a1c"
 )
-current = Path("load_drivers.sh").read_text()
+current = subprocess.check_output(
+    ["git", "show", "df27f4350223631a776057db5fee6602257e8d57:load_drivers.sh"]
+).decode()
 prefix = current[:current.index("# Keep existing best-effort tuning values.")]
 legacy = old[old.index("# 10. Network & VPN"):old.index('echo "=== load_drivers finished')]
 variant = (
@@ -156,6 +167,66 @@ all original bytes, ownership, mode, SELinux label and mtime. Its execution was
 **not tested on the live phone** because that would undo the authorized cleanup.
 Rollback restores the old Wi-Fi-forcing watchdog too. Keep the host backups if
 ADB becomes unavailable; no partition/kernel changes were made.
+
+## Follow-up: Android FD inheritance and authorized PR #1 tuning
+
+A harmless lock-only preinstall probe found that Android `/system/bin/sh`
+(mksh) closes an `exec 9>file` descriptor in an external `flock` unless the
+command explicitly inherits it. The original command failed with `Bad file
+descriptor`; KernelSU BusyBox ash accepted it. Host `/bin/sh` mocks and syntax
+checks alone did not detect this distinction.
+
+Both loader lock acquisitions now use `/system/bin/flock -n 9 9>&9`. This keeps
+the same kernel lock/open file description, early nonblocking behavior and
+bounded late retry. The new host regression fails the old source and passes the
+correction. `python3 -m unittest discover -s tests -v`: **30 passed**.
+`sh -n load_drivers.sh tests/probe_android_lock.sh` and `git diff --check`: passed.
+
+The opt-in [Android lock-only probe](../tests/probe_android_lock.sh) was copied
+outside startup directories and run under **both actual mksh and KernelSU ash**.
+Each passed acquire, cross-shell contention/exclusion, inherited-descriptor
+locking, release and reacquisition. It creates only its own new backup-directory
+lock file: it never executes the loader or repairs hardware.
+
+```bash
+# Root ADB shell; choose a new probe directory for EACH invocation.
+adb shell /system/bin/sh /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe_android_lock.sh \
+  /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe-mksh
+adb shell 'ASH_STANDALONE=1 /data/adb/ksu/bin/busybox ash /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe_android_lock.sh /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe-ash'
+```
+
+The user separately authorized installing PR #1 tuning. The new staged payload
+is the exact canonical repository `load_drivers.sh` (9,906 bytes), SHA-256
+`02d07987d5d30e327afcbee53eed6deb41e19bdeccc3310f6fbf5f92ec4f3d91`.
+Relative to the initial phone variant, its repair prefix differs **only** by the
+FD-inheritance comment and the two explicit redirections. Its tuning is the
+already-merged conservative PR #1 policy plus PR #2 successful-attempt
+coalescing/retry: ZRAM-presence-guarded `vm.page-cluster=0`, writable ZRAM
+`read_ahead_kb=0`, retained `kernel.sched_schedstats=0`; no forced scheduler fork,
+VFS-cache or UFS queue overrides. Existing network values are unchanged.
+
+Before any active-file replacement, all three current files were reverified as
+SHA-256 `f4b93861617351dd99ee4b3c93a39eb062a823469d7d08874a50f65bbdf5eaf1`.
+Exact-byte backups and metadata are verified on the Mac at
+`$HOME/g0s-pr1-tuning-c18372dd.s4jj_lfa/` and phone at
+`/data/adb/load_drivers-backups/pr1-c18372dd-20261021/`. The phone originals are
+`0:0`, mode `0755`, label `u:object_r:adb_data_file:s0`, 9,589 bytes, with mtimes
+`1792603398` (early) and `1792603399` (service/completed). New installer/rollback
+utilities explicitly inherit the FD too; the rollback restores the immediate
+pre-tuning cleanup, not the original pre-cleanup watchdog version.
+
+Staged payload, installer and rollback hashes were compared between host and
+phone. Android sh and KernelSU ash syntax checks passed. The installer's
+`--check` passed all current-byte, backup, metadata, target and lock checks
+without replacing active files. Deployment completion/readback is recorded in
+the final verification update, not implied by these preinstall checks.
+
+Preinstall live readings already showed `page-cluster=0`, ZRAM read-ahead `0`
+and scheduler statistics `0`. Old forced settings were still fork policy `1`,
+VFS cache pressure `80`, UFS affinity `2`, iostats `0`, requests `128`. Do not reset
+these to guessed defaults: removing writes changes future boot behavior, not
+existing runtime values. Android's eventual choices remain unverified until a
+separately authorized boot. No battery or performance improvement is established.
 
 ## Remaining limits
 
