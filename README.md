@@ -29,7 +29,7 @@ All pre-patched, ready-to-flash partition images and modules are included direct
 
 1. **Broadcom Wi-Fi Drop / Module Loading Failure:**
    - In GKI Android 17, the Broadcom `dhd.ko` PCIe Wi-Fi driver does not load in the proper sequence before `android.hardware.wifi-service` launches, leaving Wi-Fi disabled or unable to turn on.
-   - **Fix:** Automated modprobe loading of `dhd.ko` at `post-fs-data` before network daemons start, with a runtime watchdog.
+   - **Fix:** Automated modprobe loading of `dhd.ko` at `post-fs-data` before network daemons start, with stage-aware fallback and conditional HAL recovery (without forcing Wi-Fi on).
 
 2. **KernelSU Next UAPI 5 vs 6 Incompatibility:**
    - Prebuilt kernels with older KernelSU Next branches expose KernelSU UAPI 5. KernelSU Next Manager v3.4+ displays a warning: *"KernelSU Next manager version is too low / UAPI mismatch, upgrade to version 6"*.
@@ -133,17 +133,62 @@ The pre-patched driver is already provided at `kernel_files/fingerprint_fixed.ko
 ### Step 5: Install Driver Loader & Boot Persistence (`load_drivers.sh`)
 [`load_drivers.sh`](load_drivers.sh) orchestrates the correct loading order for Wi-Fi and fingerprint drivers, configures TSP hardware FOD boundaries, initializes biometrics permissions, and ensures full persistence across cold/warm reboots.
 
-1. Push [`load_drivers.sh`](load_drivers.sh) into KernelSU startup stages:
-   ```bash
-   adb push load_drivers.sh /data/adb/post-fs-data.d/load_drivers.sh
-   adb push load_drivers.sh /data/adb/service.d/load_drivers.sh
-   adb push load_drivers.sh /data/adb/boot-completed.d/load_drivers.sh
-   adb shell "su -c 'chmod 0755 /data/adb/*/*.sh'"
-   ```
-2. Trigger execution immediately (without rebooting):
-   ```bash
-   adb shell "su -c 'sh /data/adb/post-fs-data.d/load_drivers.sh'"
-   ```
+The three stages remain necessary: early driver insertion, late fallback, and
+post-boot FOD/permission verification. The script infers its stage from its
+installed path. Duplicate successful invocations in the same stage are skipped;
+failed repairs remain retryable. There is no global “already ran” guard.
+
+**For a separately authorized installation (not performed by this repository
+change):** back up all existing stage copies outside the startup directories
+first, including a `boot-completed.d` copy if present. Then deploy the same version
+to all three paths; do not mix old and new copies (the old script ignores locks).
+
+```bash
+adb push load_drivers.sh /data/local/tmp/load_drivers.sh
+adb shell "su -c 'mkdir -p /data/adb/post-fs-data.d /data/adb/service.d /data/adb/boot-completed.d'"
+adb shell "su -c 'cp /data/local/tmp/load_drivers.sh /data/adb/post-fs-data.d/load_drivers.sh && cp /data/local/tmp/load_drivers.sh /data/adb/service.d/load_drivers.sh && cp /data/local/tmp/load_drivers.sh /data/adb/boot-completed.d/load_drivers.sh && chmod 0755 /data/adb/post-fs-data.d/load_drivers.sh /data/adb/service.d/load_drivers.sh /data/adb/boot-completed.d/load_drivers.sh'"
+```
+
+The loader requires Android `/system/bin/flock` with `-n` and FD locking,
+`pgrep`, and `pkill`, plus the existing module tools and KernelSU `ksud`.
+Verify those tools on the target before installation. Early boot does not wait
+for the lock or for Android; late contention is bounded. Failed lock acquisition
+leaves hardware untouched and is retried by a later stage/manual invocation.
+
+For an explicitly authorized live repair, use the late stage, not the early path:
+
+```bash
+adb shell "su -c 'sh /data/adb/service.d/load_drivers.sh'"
+```
+
+This does **not** force Wi-Fi on. It preserves driver and HAL recovery without
+overriding an intentional off choice. Enable Wi-Fi in Settings if desired.
+Fingerprint patched-module preference, both qbt node permissions, FOD rectangle,
+biometrics directories/labels and incompatible-property removals remain intact.
+HALs are not restarted just because the script ran again.
+
+State lives under `/data/adb/load_drivers-state/<boot-id>/`; successful repairs
+are tracked per stage, not globally. Failed repairs and failed HAL restarts
+remain retryable. To deliberately reapply a completed stage after external
+changes, remove only its `early.repairs`, `service.repairs` or
+`completed.repairs` marker while no loader is running, then invoke that stage.
+Do not remove the active `lock` file or whole active state directory.
+A reboot naturally uses fresh state. Keep old boot directories until a safe
+maintenance window; they do not affect the new boot.
+
+**Rollback:** restore all backed-up startup copies together while no loader is
+running, retaining the patched fingerprint module. Rollback to the previous
+script also restores its Wi-Fi-forcing watchdog. No kernel rebuild or partition
+flash is needed for this script-only change. Actual boot, Wi-Fi/BT operation,
+enrollment and unlock still require separate device validation.
+
+Host regression checks (never execute the Android script directly on a host):
+
+```bash
+python3 -m unittest discover -s tests -v
+sh -n load_drivers.sh
+git diff --check
+```
 
 ---
 

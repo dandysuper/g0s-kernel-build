@@ -60,125 +60,52 @@ fastboot flash vendor_dlkm vendor_dlkm.img
 ```
 
 ### C. Driver Loading & Hardware Permissions (Multi-Stage Boot Persistence)
-To prevent first-stage init ramdisk kernel panics while ensuring drivers are ready before the user or Android framework interacts with hardware:
-- **BusyBox vs Android modprobe incompatibility:** KernelSU executes boot scripts via BusyBox ash with `ASH_STANDALONE=1`. Under this environment, BusyBox intercepts bare commands like `modprobe` and dispatches them to its built-in applet, which rejects the `-d <DIR>` argument (`modprobe: invalid option -- d`). All driver load invocations MUST explicitly call `/system/bin/modprobe`.
-- **Multi-Stage Orchestration:** The startup script is deployed to three stages (`post-fs-data.d`, `service.d`, and `boot-completed.d`):
-  1. `post-fs-data.d`: Loads `dhd.ko`, `fingerprint_sysfs.ko`, and `fingerprint.ko` via `/system/bin/modprobe -d /vendor_dlkm/lib/modules ...`, creates `/dev/qbt2000*` nodes, and applies `0660 system:system` permissions *before* Android HAL services start. This prevents HAL death on initial boot (`HAL deaths since last reboot: 0`).
-  2. `service.d`: Acts as a fallback sanity check and verifies permissions.
-  3. `boot-completed.d`: Re-verifies FOD state and ensures Wi-Fi is enabled (`cmd wifi set-wifi-enabled enabled`) if Android framework entered `DisabledState` during early boot.
-- All actions are logged with timestamps to `/data/adb/load_drivers.log`.
 
-The script:
-```bash
-#!/system/bin/sh
-LOGFILE="/data/adb/load_drivers.log"
-exec >> "$LOGFILE" 2>&1
-echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] load_drivers ($0, PID $$) ==="
+The canonical implementation is [load_drivers.sh](load_drivers.sh), not an embedded
+copy of the script. See [README installation and recovery](README.md#step-5-install-driver-loader--boot-persistence-load_driverssh).
+Do not load these drivers from the first-stage ramdisk: `/vendor` firmware must
+already be mounted.
 
-DHD_LOADED_NOW=0
-FP_LOADED_NOW=0
+- **Android tools:** All driver insertion calls explicitly use
+  `/system/bin/modprobe -d /vendor_dlkm/lib/modules` or `/system/bin/insmod`.
+  KernelSU BusyBox standalone mode must not intercept `modprobe`.
+- **Stages:** Install the same version in `post-fs-data.d`, `service.d`, and
+  `boot-completed.d`. The parent directory selects early, service, or completed.
+  Early attempts module loading and available repairs without sleeps, framework
+  waits, or waiting for the loader lock. Service and completed each independently
+  verify repairs, retry missing drivers, and may briefly wait for device nodes.
+  These stage passes are intentional, not duplicate full-script runs.
+- **Preserved repairs:** Prefer `/data/adb/modules_fixed/fingerprint.ko` when
+  present; otherwise use the stock module. Preserve `fingerprint_sysfs`, qbt node
+  ownership/mode, fingerprint sysfs ownership, biometrics/QTI directories and
+  SELinux label, FOD enable and `set_fod_rect,426,1675,654,1903`, and deletion of
+  both incompatible fingerprint properties.
+- **Deduplication/retry:** A boot-ID-scoped state directory and
+  `/system/bin/flock -n 9` serialize all stages. Successful repairs are recorded
+  separately per stage; missing nodes, failed commands, or a non-OK FOD result
+  leave that stage retryable. Driver presence is always rechecked, even after
+  a stage succeeded. Late lock acquisition is bounded to ten 0.1-second retries.
+  If locking is unavailable, no unprotected hardware actions run.
+- **HAL recovery:** Restart only when this loader inserted a missing driver and
+  its HAL was already running before insertion. Fingerprint restart waits until
+  the stage's hardware repairs succeed. A failed restart remains pending for
+  a later invocation. A healthy repeat does not restart HALs.
+- **Wi-Fi intent:** Removed the enable watchdog. Android's disabled state does
+  not distinguish broken startup from intentional Wi-Fi off. The loader still
+  repairs missing drivers/running HALs but never sends `set-wifi-enabled`.
+  If Wi-Fi remains disabled after repair, enable it deliberately in Settings.
+- **Tuning:** Existing network, TCPMSS, scheduler-statistics and ZRAM values are
+  unchanged; successful best-effort tuning attempts are coalesced per boot.
+  Failed commands or unavailable ZRAM leave tuning retryable.
+- **Recovery:** Locks are released by the kernel on exit/crash; stale lock files
+  cannot block the next invocation. A new boot ID starts fresh stage state.
+  Log: `/data/adb/load_drivers.log`. Old boot-state directories are inert and
+  can be removed during maintenance; do not delete active lock/state while a
+  loader is running.
 
-# 1. Broadcom Wi-Fi Driver
-if ! lsmod | grep -q "^dhd "; then
-    echo "Loading dhd.ko..."
-    /system/bin/modprobe -d /vendor_dlkm/lib/modules dhd
-    if lsmod | grep -q "^dhd "; then
-        echo "dhd.ko loaded successfully."
-        DHD_LOADED_NOW=1
-    else
-        echo "Failed to load dhd.ko!"
-    fi
-else
-    echo "dhd.ko already present."
-fi
-
-# 2. Fingerprint Drivers
-if ! lsmod | grep -q "^fingerprint_sysfs "; then
-    echo "Loading fingerprint_sysfs.ko..."
-    /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint_sysfs
-fi
-
-if ! lsmod | grep -q "^fingerprint "; then
-    if [ -f /data/adb/modules_fixed/fingerprint.ko ]; then
-        echo "Loading patched fingerprint.ko from /data/adb/modules_fixed/..."
-        /system/bin/insmod /data/adb/modules_fixed/fingerprint.ko
-    else
-        echo "Loading stock fingerprint.ko..."
-        /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
-    fi
-    if lsmod | grep -q "^fingerprint "; then
-        echo "fingerprint.ko loaded successfully."
-        FP_LOADED_NOW=1
-    else
-        echo "Failed to load fingerprint.ko!"
-    fi
-else
-    echo "fingerprint.ko already present."
-fi
-
-# 3. Fix /dev/qbt2000* permissions
-for i in 1 2 3 4 5; do
-    if [ -e /dev/qbt2000_fd ]; then
-        break
-    fi
-    sleep 0.1
-done
-if [ -e /dev/qbt2000_fd ] || [ -e /dev/qbt2000_ipc ]; then
-    /system/bin/chown system:system /dev/qbt2000* 2>/dev/null || true
-    /system/bin/chmod 0660 /dev/qbt2000* 2>/dev/null || true
-    echo "/dev/qbt2000* permissions verified."
-fi
-
-# 4. Touchscreen FOD mode
-if [ -e /sys/class/sec/tsp/cmd ]; then
-    echo "fod_enable,1" > /sys/class/sec/tsp/cmd 2>/dev/null || true
-    echo "FOD cmd result: $(cat /sys/class/sec/tsp/cmd_result 2>/dev/null || cat /sys/class/sec/tsp/cmd_status 2>/dev/null)"
-fi
-
-# 5. Sysfs fingerprint node permissions
-if [ -d /sys/class/fingerprint/fingerprint ]; then
-    /system/bin/chown system:radio /sys/class/fingerprint/fingerprint/* 2>/dev/null || true
-fi
-
-# 6. Biometrics Template & Vendor Directories
-mkdir -p /data/vendor/biometrics/fp/User_0
-mkdir -p /data/vendor/biometrics/ta
-mkdir -p /data/vendor/biometrics/bk
-mkdir -p /data/vendor/biometrics/meta
-/system/bin/chown -R system:system /data/vendor/biometrics 2>/dev/null || true
-/system/bin/chmod -R 0770 /data/vendor/biometrics 2>/dev/null || true
-/system/bin/chcon -R u:object_r:biometrics_vendor_data_file:s0 /data/vendor/biometrics 2>/dev/null || true
-
-# 7. Restart HALs ONLY if drivers were newly loaded in this run
-if [ "$DHD_LOADED_NOW" = "1" ]; then
-    echo "dhd.ko was newly loaded, restarting wifi-service..."
-    /system/bin/pkill -f android.hardware.wifi-service || true
-fi
-
-if [ "$FP_LOADED_NOW" = "1" ]; then
-    echo "fingerprint was newly loaded, restarting fingerprint-service..."
-    /system/bin/pkill -f android.hardware.biometrics.fingerprint || true
-fi
-
-# 8. Wi-Fi enable watchdog
-if [ "$(getprop sys.boot_completed)" = "1" ]; then
-    for attempt in 1 2 3 4 5; do
-        WIFI_STATUS=$(cmd wifi status 2>/dev/null || true)
-        if echo "$WIFI_STATUS" | grep -q "Wifi is disabled"; then
-            echo "Wi-Fi is disabled, sending enable command (attempt $attempt)..."
-            cmd wifi set-wifi-enabled enabled 2>/dev/null || true
-            sleep 2
-        elif echo "$WIFI_STATUS" | grep -q "Wifi is enabled"; then
-            echo "Wi-Fi is confirmed enabled."
-            break
-        fi
-        sleep 2
-    done
-fi
-
-echo "=== load_drivers finished ==="
-```
-Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/load_drivers.sh`
+Boot behavior is host-mock tested only. It does not establish working Wi-Fi,
+Bluetooth, enrollment, unlock, boot timing, or battery savings on a phone.
+No kernel/module images or Bluetooth module ordering are changed.
 
 ### D. Root Management & KernelSU Next UAPI 6 Alignment
 - Installed the matching **KernelSU Next Manager** APK `KernelSU_Next_v3.4.2-50-gb427a3f9_33405-release.apk` (built with UAPI 6 support) directly from GitHub Actions CI run `39297115788`.

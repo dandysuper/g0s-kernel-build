@@ -4,6 +4,11 @@ This document outlines the exact toolchain, procedures, and commands used to unp
 
 ---
 
+> The duplicate-boot-action cleanup is script-only: it does not require any of
+> the kernel/image rebuild or flashing steps below. Use the stage installation,
+> recovery and host-mock checks in [README Step 5](README.md#step-5-install-driver-loader--boot-persistence-load_driverssh).
+> Existing kernel images, patched modules and Bluetooth module ordering are unchanged.
+
 ## 1. Required Host Tools & Setup
 
 All operations were executed on macOS (`arm64`). Install the required command-line utilities using Homebrew:
