@@ -15,11 +15,13 @@ Usage:
 """
 
 import argparse
+import mmap
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -43,72 +45,166 @@ def run_quiet(cmd, **kw):
     if proc.returncode != 0:
         print(proc.stdout)
         print(proc.stderr, file=sys.stderr)
-        subprocess.run(cmd, check=True, **kw)
+        proc.check_returncode()
     return proc
 
 
-def kernel_vermagic(image_path):
-    """Pull the vermagic string out of a raw arm64 Image."""
-    out = subprocess.run(
-        ["strings", image_path], capture_output=True, text=True, check=True
-    ).stdout
-    m = re.search(r"(5\.10\.\d+[^\n]*? SMP preempt[^\n]*)", out)
-    return m.group(1).strip() if m else None
+def binary_string(path, pattern):
+    """Inspect NUL-delimited metadata without subprocesses or whole-file copies."""
+    with open(path, "rb") as source:
+        if not os.fstat(source.fileno()).st_size:
+            return None
+        with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            match = re.search(pattern, data)
+            return match.group(1).decode("ascii").strip() if match else None
+
+
+def kernel_release(image_path):
+    release = binary_string(image_path, rb"Linux version (\d+\.\d+\.\d+[^\x00\s]*)[ \t]")
+    if release:
+        return release
+    return binary_string(image_path, rb"(?:^|\x00)(\d+\.\d+\.\d+[^\x00\s]*) SMP ")
 
 
 def module_vermagic(ko_path):
-    out = subprocess.run(
-        ["strings", ko_path], capture_output=True, text=True, check=True
-    ).stdout
-    m = re.search(r"vermagic=(5\.10\.\d+[^\n]*)", out)
-    return m.group(1).strip() if m else None
+    return binary_string(ko_path, rb"(?:^|\x00)vermagic=([^\x00\r\n]+)")
+
+
+def scan_module_tree(modules_src):
+    modules = {}
+    metadata = {}
+    if not os.path.isdir(modules_src):
+        raise ValueError(f"module directory does not exist: {modules_src}")
+    for root, dirs, files in os.walk(modules_src):
+        dirs.sort()
+        for name in sorted(files):
+            if name.endswith(".ko"):
+                destination = modules
+            elif name in ("modules.dep", "modules.alias", "modules.softdep"):
+                destination = metadata
+            else:
+                continue
+            if name in destination:
+                raise ValueError(f"duplicate module/metadata basename: {name}; select one kernel release")
+            destination[name] = os.path.join(root, name)
+    if not modules:
+        raise ValueError("no .ko modules found")
+    return modules, metadata
+
+
+def read_dependencies(src_dep):
+    entries = {}
+    with open(src_dep, encoding="utf-8") as source:
+        for number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            if ":" not in line:
+                raise ValueError(f"malformed modules.dep line {number}")
+            target, dependencies = line.split(":", 1)
+            name = os.path.basename(target.strip())
+            if not name.endswith(".ko") or name in entries:
+                raise ValueError(f"invalid or duplicate dependency target: {name}")
+            entries[name] = [os.path.basename(path) for path in dependencies.split()]
+    return entries
+
+
+def verify_modules(image_path, modules_src):
+    modules, metadata = scan_module_tree(modules_src)
+    with open(image_path, "rb") as image:
+        if image.read(64)[56:60] != b"ARM\x64":
+            raise ValueError("--image must be an uncompressed arm64 kernel Image, not boot.img")
+    release = kernel_release(image_path)
+    if not release:
+        raise ValueError("no kernel release found in Image")
+    required = {"dhd.ko", "cfg80211.ko", "bcm43xx.ko", "fingerprint.ko", "fingerprint_sysfs.ko"}
+    missing = required - modules.keys()
+    if missing:
+        raise ValueError("required modules missing: " + ", ".join(sorted(missing)))
+    expected = None
+    for name, path in modules.items():
+        with open(path, "rb") as module:
+            header = module.read(20)
+        if header[:6] != b"\x7fELF\x02\x01" or header[16:20] != b"\x01\x00\xb7\x00":
+            raise ValueError(f"not an arm64 relocatable ELF module: {name}")
+        vermagic = module_vermagic(path)
+        # Match a complete release token, not a prefix (5.10.26 != 5.10.260).
+        if not vermagic or vermagic.split()[0] != release or "aarch64" not in vermagic.split():
+            raise ValueError(f"kernel/module release mismatch: {release} vs {vermagic!r} ({name})")
+        if expected is not None and vermagic != expected:
+            raise ValueError(f"mixed module ABI flags: {name}: {vermagic!r} != {expected!r}")
+        expected = vermagic
+    if "modules.dep" not in metadata:
+        raise ValueError("no modules.dep found in the build output")
+    entries = read_dependencies(metadata["modules.dep"])
+    if entries.keys() != modules.keys():
+        raise ValueError("modules.dep does not describe exactly the supplied module set")
+    for name, dependencies in entries.items():
+        unknown = set(dependencies) - modules.keys()
+        if unknown:
+            raise ValueError(f"unresolved dependencies for {name}: {', '.join(sorted(unknown))}")
+    print(f"  kernel release: {release}")
+    print(f"  module ABI: {expected}")
+    print(f"  verified all {len(modules)} modules ({sum(os.path.getsize(p) for p in modules.values())} bytes)")
+    return modules, metadata
+
+
+def validate_load_lists(early_path, late_path, modules):
+    def read_list(path):
+        with open(path, encoding="utf-8") as source:
+            return [line.split("#", 1)[0].strip() for line in source if line.split("#", 1)[0].strip()]
+
+    def module_name(entry):
+        return os.path.basename(entry).removesuffix(".ko").replace("-", "_")
+
+    early = [module_name(entry) for entry in read_list(early_path)]
+    late = [module_name(entry) for entry in read_list(late_path)]
+    available = {module_name(name) for name in modules}
+    if not early or not late:
+        raise ValueError("both preserved early and vendor_dlkm modules.load lists are required")
+    if len(early) != len(set(early)) or len(late) != len(set(late)):
+        raise ValueError("duplicate entries in a preserved modules.load list")
+    if (set(early) | set(late)) - available:
+        raise ValueError("modules.load references modules absent from the build")
+    if "bcm43xx" not in early:
+        raise ValueError("Bluetooth bcm43xx must remain in the early load list")
+    if not {"dhd", "fingerprint", "fingerprint_sysfs"} <= set(late):
+        raise ValueError("vendor_dlkm must load Wi-Fi and fingerprint after /vendor mounts")
+    if set(early) & set(late):
+        raise ValueError("late-only modules remain in the early list; strict init may abort")
 
 
 def strip_modules(module_dir):
-    """Strip debug info from every .ko so the set fits the vendor_dlkm partition.
+    """Strip DWARF only, keeping module symbols and vermagic intact.
 
-    A module tree straight out of the build carries full DWARF and runs to over
-    100 MB, which can never fit 19,685,376 bytes. llvm-strip / cross binutils
-    --strip-debug removes only DWARF and leaves .symtab alone, so module loading
-    and vermagic are unaffected. macOS /usr/bin/strip speaks Mach-O and is
-    deliberately not used here.
+    KASAN instrumentation cannot be stripped; it must be disabled at build time.
+    macOS /usr/bin/strip speaks Mach-O and is deliberately not used here.
     """
     tool = None
-    for cand in ("llvm-strip", "aarch64-linux-gnu-strip", "aarch64-linux-gnu-objcopy"):
-        if shutil.which(cand):
-            tool = cand
+    for candidate in ("llvm-strip", "aarch64-linux-gnu-strip", "aarch64-linux-gnu-objcopy"):
+        tool = shutil.which(candidate)
+        if tool:
             break
     if tool is None:
-        print("  ! no ELF-capable strip found (llvm-strip / aarch64-linux-gnu-*)")
-        print("  ! leaving modules unstripped - the EROFS build will likely overflow")
+        print("  ! no ELF-capable strip found; preserving modules unchanged")
         return
 
-    before = after = 0
-    for f in sorted(os.listdir(module_dir)):
-        if not f.endswith(".ko"):
-            continue
-        p = os.path.join(module_dir, f)
-        before += os.path.getsize(p)
-        subprocess.run([tool, "--strip-debug", p], check=True)
-        after += os.path.getsize(p)
-    saved = before - after
-    print(f"  {tool}: {before} -> {after} bytes (freed {saved})")
+    paths = [os.path.join(module_dir, name) for name in sorted(os.listdir(module_dir)) if name.endswith(".ko")]
+    before = sum(os.path.getsize(path) for path in paths)
+    # strip supports many inputs; objcopy treats a second path as an output.
+    batch_size = 1 if tool.endswith("-objcopy") else 128
+    for start in range(0, len(paths), batch_size):
+        subprocess.run([tool, "--strip-debug", *paths[start:start + batch_size]], check=True)
+    after = sum(os.path.getsize(path) for path in paths)
+    print(f"  {tool}: {before} -> {after} bytes (freed {before - after})")
 
 
 def flatten_modules(modules_src, dest):
-    """Copy every .ko into a flat lib/modules tree, like the stock images use."""
+    """Copy one unambiguous kernel release into the stock flat module layout."""
+    modules, _ = scan_module_tree(modules_src)
     os.makedirs(dest, exist_ok=True)
-    found = 0
-    for root, _, files in os.walk(modules_src):
-        for f in files:
-            if f.endswith(".ko"):
-                src = os.path.join(root, f)
-                dst = os.path.join(dest, f)
-                if os.path.exists(dst):
-                    print("  ! duplicate module basename:", f)
-                shutil.copy2(src, dst)
-                found += 1
-    return found
+    for name, source in modules.items():
+        shutil.copy2(source, os.path.join(dest, name))
+    return len(modules)
 
 
 def rewrite_dep(src_dep, dest_dep, prefix):
@@ -120,18 +216,7 @@ def rewrite_dep(src_dep, dest_dep, prefix):
     depmod on the runner emits build-tree relative paths (kernel/drivers/...),
     so each entry is reduced to its basename and re-prefixed for its partition.
     """
-    entries = {}
-    with open(src_dep, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if not line or ":" not in line:
-                continue
-            target, deps = line.split(":", 1)
-            name = os.path.basename(target.strip())
-            entries[name] = [
-                os.path.basename(d.strip()) for d in deps.split() if d.strip()
-            ]
-
+    entries = read_dependencies(src_dep)
     with open(dest_dep, "w", encoding="utf-8") as fh:
         for name in sorted(entries):
             deps = "".join(f" {prefix}{d}" for d in entries[name])
@@ -220,42 +305,28 @@ def build_vendor_dlkm(module_dir, modules_load, src_dep, out_img):
         "/vendor_dlkm/lib/modules/",
     )
 
-    tmp_img = os.path.join(WORK, "vendor_dlkm_raw.img")
-
-    # vendor_dlkm is a fixed 4806-block (19,685,376 byte) partition. A lz4hc,12
-    # image of the stock module set is 19,079,168 bytes, so there is ~592 KB of
-    # headroom - real, but not generous. Climb the compression ladder instead of
-    # failing if a future module set grows past the ceiling.
-    # lz4hc accepts levels 1-12 only; 14/16 are rejected by mkfs.erofs and used
-    # to abort the ladder instead of falling through. Each attempt is therefore
-    # allowed to fail and simply moves on.
-    data = None
-    for spec in ("lz4hc,12", "lz4hc,9", "lz4,9", "lz4,1"):
-        proc = subprocess.run(
-            ["mkfs.erofs", "-b", "4096", "-z", spec, tmp_img, staging],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            print(f"  erofs {spec:<10} unsupported, skipped")
-            continue
-        size = os.path.getsize(tmp_img)
-        print(f"  erofs {spec:<10} {size} bytes / {VENDOR_DLKM_SIZE} limit")
-        if size <= VENDOR_DLKM_SIZE:
-            with open(tmp_img, "rb") as fh:
-                data = fh.read()
-            print(f"  settled on: {spec}")
-            break
-
-    if data is None:
-        sys.exit(
-            "FATAL: vendor_dlkm does not fit even at maximum compression - "
-            "the module set has outgrown the partition"
-        )
-
-    with open(out_img, "wb") as fh:
-        fh.write(data + b"\x00" * (VENDOR_DLKM_SIZE - len(data)))
-    print(f"  vendor_dlkm: {len(data)} bytes -> padded to {VENDOR_DLKM_SIZE}")
+    # Maximum supported LZ4HC compression first and only. Lower/unsupported
+    # levels already failed to solve the measured partition-size problem.
+    # Build beside the destination so failure cannot replace a valid image.
+    directory = os.path.dirname(os.path.abspath(out_img))
+    with tempfile.NamedTemporaryFile(prefix=".vendor-dlkm-", dir=directory, delete=False) as output:
+        temporary = output.name
+    try:
+        run_quiet(["mkfs.erofs", "-b", "4096", "-z", "lz4hc,12", temporary, staging])
+        size = os.path.getsize(temporary)
+        if not 0 < size <= VENDOR_DLKM_SIZE:
+            raise ValueError(f"vendor_dlkm is {size} bytes; fixed partition limit is {VENDOR_DLKM_SIZE}")
+        # truncate extends with zeros without allocating an image-sized Python
+        # buffer. Rename only after the complete padded file has been flushed.
+        with open(temporary, "r+b") as output:
+            output.truncate(VENDOR_DLKM_SIZE)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, out_img)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f"  vendor_dlkm: {size} bytes -> padded to {VENDOR_DLKM_SIZE}")
 
 
 def package_zip(boot, vboot, dlkm, dtbo, out_zip):
@@ -303,17 +374,24 @@ ui_print("Done. Reboot to system.");
     ) as fh:
         fh.write(script)
 
-    if os.path.exists(out_zip):
-        os.remove(out_zip)
-
-    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for root, _, files in os.walk(staging):
-            for f in sorted(files):
-                full = os.path.join(root, f)
-                rel = os.path.relpath(full, staging)
-                if f == ".DS_Store" or "__MACOSX" in rel:
-                    continue
-                zf.write(full, rel)
+    directory = os.path.dirname(os.path.abspath(out_zip))
+    os.makedirs(directory, exist_ok=True)
+    with tempfile.NamedTemporaryFile(prefix=".kernel-package-", dir=directory, delete=False) as output:
+        temporary = output.name
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            for root, dirs, files in os.walk(staging):
+                dirs.sort()
+                for f in sorted(files):
+                    full = os.path.join(root, f)
+                    rel = os.path.relpath(full, staging).replace(os.sep, "/")
+                    if f == ".DS_Store" or "__MACOSX" in rel:
+                        continue
+                    zf.write(full, rel)
+        os.replace(temporary, out_zip)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def main():
@@ -321,13 +399,29 @@ def main():
     ap.add_argument("--image", required=True, help="new kernel Image")
     ap.add_argument("--modules", required=True, help="lib/modules dir from modules_install")
     ap.add_argument("--out", default=os.path.join(BASE, "out"))
+    ap.add_argument("--zip", help="output package path (defaults to --out/ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip)")
+    ap.add_argument("--verify-only", action="store_true", help="verify Image and every module without repacking")
     args = ap.parse_args()
 
-    os.makedirs(args.out, exist_ok=True)
-    modules_load = os.path.join(WORK, "vr1", "lib", "modules", "modules.load")
-    if not os.path.exists(modules_load):
-        sys.exit(f"missing preserved modules.load at {modules_load}")
+    print("== verify Image, every module and dependency ==")
+    try:
+        modules, metadata = verify_modules(args.image, args.modules)
+        if args.verify_only:
+            return
+        early_load = os.path.join(WORK, "vr1", "lib", "modules", "modules.load")
+        late_load = os.path.join(WORK, "dlkm", "lib", "modules", "modules.load")
+        validate_load_lists(early_load, late_load, modules)
+        for relative in ("boot/ramdisk", "vboot/dtb", "vboot/bootconfig", "vboot/vendor_ramdisk00",
+                         "ek/files/dtbo.img", "ek/META-INF/com/google/android/update-binary"):
+            if not os.path.isfile(os.path.join(WORK, relative)):
+                raise ValueError(f"missing preserved input: work/{relative}")
+        for tool in ("lz4", "mkfs.erofs"):
+            if not shutil.which(tool):
+                raise ValueError(f"required host tool unavailable: {tool}")
+    except (OSError, ValueError) as error:
+        ap.exit(1, f"FATAL: {error}\n")
 
+    os.makedirs(args.out, exist_ok=True)
     print("== 1. flatten modules ==")
     flat = os.path.join(WORK, "flat_modules")
     shutil.rmtree(flat, ignore_errors=True)
@@ -344,34 +438,20 @@ def main():
     print(f"  {total} bytes of modules vs {VENDOR_DLKM_SIZE} partition")
 
     print("== 2. modules.dep ==")
-    src_dep = None
-    for root, _, files in os.walk(args.modules):
-        if "modules.dep" in files:
-            src_dep = os.path.join(root, "modules.dep")
-            break
-    if not src_dep:
-        sys.exit("FATAL: no modules.dep found in the build output")
+    src_dep = metadata["modules.dep"]
     n = rewrite_dep(src_dep, os.path.join(flat, "modules.dep"), "/lib/modules/")
     print(f"  {n} dep entries")
-    for meta in ("modules.alias", "modules.softdep"):
-        for root, _, files in os.walk(args.modules):
-            if meta in files:
-                shutil.copy2(os.path.join(root, meta), os.path.join(flat, meta))
-                break
+    for name in ("modules.alias", "modules.softdep"):
+        if name in metadata:
+            shutil.copy2(metadata[name], os.path.join(flat, name))
 
-    print("== 3. vermagic check ==")
-    kv = kernel_vermagic(args.image)
-    sample = next(f for f in sorted(os.listdir(flat)) if f.endswith(".ko"))
-    mv = module_vermagic(os.path.join(flat, sample))
-    print(f"  kernel : {kv}")
-    print(f"  module : {mv}")
-    if not kv or not mv or kv != mv:
-        sys.exit("FATAL: kernel/module vermagic mismatch - modules will not load")
+    print("== 3. verify stripped modules ==")
+    verify_modules(args.image, flat)
 
     print("== 4. vendor_ramdisk01 ==")
     frag_cpio = os.path.join(WORK, "vr1_new.cpio")
     frag_lz4 = os.path.join(WORK, "vr1_new.lz4")
-    build_ramdisk_fragment(flat, modules_load, frag_cpio, frag_lz4)
+    build_ramdisk_fragment(flat, early_load, frag_cpio, frag_lz4)
 
     print("== 5. boot.img ==")
     out_boot = os.path.join(args.out, "boot.img")
@@ -383,12 +463,11 @@ def main():
 
     print("== 7. vendor_dlkm.img ==")
     out_dlkm = os.path.join(args.out, "vendor_dlkm.img")
-    build_vendor_dlkm(flat, modules_load, src_dep, out_dlkm)
+    build_vendor_dlkm(flat, late_load, src_dep, out_dlkm)
 
     print("== 8. package ==")
-    out_zip = os.path.join(
-        os.path.expanduser("~/Downloads"),
-        "ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip",
+    out_zip = os.path.abspath(os.path.expanduser(args.zip)) if args.zip else os.path.join(
+        args.out, "ExtremeKRNL-g0s-LineageOS24-rebuild-KSU.zip",
     )
     package_zip(
         out_boot, out_vboot, out_dlkm,

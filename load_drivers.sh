@@ -11,7 +11,7 @@ case "${1:-$0}" in
     service|*/service.d/*) STAGE=service ;;
     *) STAGE=service ;;
 esac
-BOOT_ID=$(cat /proc/sys/kernel/random/boot_id) || exit 1
+IFS= read -r BOOT_ID < /proc/sys/kernel/random/boot_id || exit 1
 case "$BOOT_ID" in ''|*[!a-zA-Z0-9-]*) exit 1 ;; esac
 STATE="/data/adb/load_drivers-state/$BOOT_ID"
 umask 077
@@ -35,19 +35,26 @@ if ! /system/bin/flock -n 9 9>&9; then
     fi
 fi
 
+# Sysfs distinguishes a live module from one still loading/unloading without
+# spawning lsmod/grep pipelines on every check. Do not cache across insertions.
+module_loaded() {
+    [ -r "/sys/module/$1/initstate" ] || return 1
+    IFS= read -r module_state < "/sys/module/$1/initstate" || return 1
+    [ "$module_state" = live ]
+}
+
 DHD_LOADED_NOW=0
 FP_LOADED_NOW=0
-# A HAL started after module insertion needs no restart. Record pre-load state.
 WIFI_WAS_RUNNING=0
 FP_WAS_RUNNING=0
-/system/bin/pgrep -f android.hardware.wifi-service >/dev/null 2>&1 && WIFI_WAS_RUNNING=1
-/system/bin/pgrep -f android.hardware.biometrics.fingerprint >/dev/null 2>&1 && FP_WAS_RUNNING=1
 
 # 1. Broadcom Wi-Fi Driver
-if ! lsmod | grep -q "^dhd "; then
+if ! module_loaded dhd; then
+    # A HAL started after module insertion needs no restart.
+    /system/bin/pgrep -f android.hardware.wifi-service >/dev/null 2>&1 && WIFI_WAS_RUNNING=1
     echo "Loading dhd.ko..."
     /system/bin/modprobe -d /vendor_dlkm/lib/modules dhd
-    if lsmod | grep -q "^dhd "; then
+    if module_loaded dhd; then
         echo "dhd.ko loaded successfully."
         DHD_LOADED_NOW=1
     else
@@ -58,13 +65,14 @@ else
 fi
 
 # 2. Fingerprint Drivers
-if ! lsmod | grep -q "^fingerprint_sysfs "; then
+if ! module_loaded fingerprint_sysfs; then
     echo "Loading fingerprint_sysfs.ko..."
     /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint_sysfs
     rm -f "$STATE/$STAGE.repairs"
 fi
 
-if ! lsmod | grep -q "^fingerprint "; then
+if ! module_loaded fingerprint; then
+    /system/bin/pgrep -f android.hardware.biometrics.fingerprint >/dev/null 2>&1 && FP_WAS_RUNNING=1
     if [ -f /data/adb/modules_fixed/fingerprint.ko ]; then
         echo "Loading patched fingerprint.ko from /data/adb/modules_fixed/..."
         /system/bin/insmod /data/adb/modules_fixed/fingerprint.ko
@@ -72,7 +80,7 @@ if ! lsmod | grep -q "^fingerprint "; then
         echo "Loading stock fingerprint.ko..."
         /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
     fi
-    if lsmod | grep -q "^fingerprint "; then
+    if module_loaded fingerprint; then
         echo "fingerprint.ko loaded successfully."
         FP_LOADED_NOW=1
         rm -f "$STATE/$STAGE.repairs"
@@ -89,7 +97,7 @@ REPAIRS_OK=1
 # 3. Fix /dev/qbt2000* permissions (late stages only wait briefly for nodes)
 if [ "$STAGE" != early ]; then
 for i in 1 2 3 4 5; do
-    if [ -e /dev/qbt2000_fd ]; then
+    if [ -e /dev/qbt2000_fd ] && [ -e /dev/qbt2000_ipc ]; then
         break
     fi
     sleep 0.1
@@ -146,7 +154,7 @@ else
 fi
 # A later successful module insertion must still get its repair pass.
 for module in dhd fingerprint_sysfs fingerprint; do
-    lsmod | grep -q "^$module " || REPAIRS_OK=0
+    module_loaded "$module" || REPAIRS_OK=0
 done
 if [ "$REPAIRS_OK" = 1 ]; then
     touch "$STATE/$STAGE.repairs"
@@ -183,46 +191,59 @@ fi
 # 9. Do not force Wi-Fi on: DisabledState alone cannot distinguish a failed
 # startup from the user's saved off preference. Driver/HAL repair stays above.
 
-# Keep existing best-effort tuning values. Coalesce successful attempts only;
-# unavailable settings/devices must remain retryable at later stages.
-if [ ! -f "$STATE/tuning" ]; then
-TUNING_OK=1
-# 10. Network & VPN Protocol Tuning (Eliminates PMTU black-holes, enables packet forwarding, clamps TCP MSS)
-echo "Applying Network & VPN optimizations..."
-/system/bin/sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.tcp_rmem="4096 87380 8388608" >/dev/null 2>&1 || TUNING_OK=0
-/system/bin/sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608" >/dev/null 2>&1 || TUNING_OK=0
-
-# iptables TCPMSS clamping (prevents VPN packets exceeding tunnel MTU from being silently dropped)
-iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || TUNING_OK=0
-ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || TUNING_OK=0
-
-# 11. Conservative memory and battery-efficiency tuning
-echo "Applying conservative memory & efficiency tuning..."
-# Scheduler statistics are diagnostic accounting, not a scheduling policy.
-/system/bin/sysctl -w kernel.sched_schedstats=0 >/dev/null 2>&1 || TUNING_OK=0
-
-# Avoid clustered swap-in and block read-ahead for compressed RAM. Leave Android's
-# swappiness, ZRAM sizing, CPU governor, and storage queue policy untouched.
-if [ -d /sys/block/zram0 ]; then
-    /system/bin/sysctl -w vm.page-cluster=0 >/dev/null 2>&1 || TUNING_OK=0
-    if [ -w /sys/block/zram0/queue/read_ahead_kb ]; then
-        echo 0 > /sys/block/zram0/queue/read_ahead_kb 2>/dev/null || TUNING_OK=0
-    else
-        TUNING_OK=0
+# Hardware recovery is the only work on the blocking post-fs-data path. Keep
+# optional tuning and bounded xtables lock waits in asynchronous stages.
+if [ "$STAGE" != early ] && [ ! -f "$STATE/tuning" ]; then
+    # Do not enable forwarding globally: it resets IPv4 host settings and
+    # changes IPv6 router-advertisement behavior. netd owns routing and buffers.
+    if [ ! -f "$STATE/tuning.network" ]; then
+        if [ ! -e /proc/sys/net/ipv4/tcp_mtu_probing ] ||
+            /system/bin/sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1; then
+            touch "$STATE/tuning.network"
+        fi
     fi
-else
-    TUNING_OK=0
-fi
 
-if [ "$TUNING_OK" = 1 ]; then touch "$STATE/tuning"; fi
+    # Track families independently so absent IPv6 or a failed rule never
+    # replays successful sysctl writes or duplicates the other family's rule.
+    for family in ipv4 ipv6; do
+        [ -f "$STATE/tuning.mss.$family" ] && continue
+        if [ ! -d "/proc/sys/net/$family" ]; then
+            touch "$STATE/tuning.mss.$family"
+            continue
+        fi
+        case "$family" in ipv4) firewall=iptables ;; ipv6) firewall=ip6tables ;; esac
+        if "$firewall" -w 1 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null ||
+            "$firewall" -w 1 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+            touch "$STATE/tuning.mss.$family"
+        fi
+    done
+
+    # Some production kernels omit scheduler statistics entirely.
+    if [ ! -f "$STATE/tuning.scheduler" ]; then
+        if [ ! -e /proc/sys/kernel/sched_schedstats ] ||
+            /system/bin/sysctl -w kernel.sched_schedstats=0 >/dev/null 2>&1; then
+            touch "$STATE/tuning.scheduler"
+        fi
+    fi
+
+    # A delayed ZRAM device must not cause successful network tuning to repeat.
+    # Android retains swappiness, compression, sizing, LMKD and thermal policy.
+    if [ ! -f "$STATE/tuning.zram" ] && [ -d /sys/block/zram0 ]; then
+        ZRAM_OK=1
+        /system/bin/sysctl -w vm.page-cluster=0 >/dev/null 2>&1 || ZRAM_OK=0
+        if [ -w /sys/block/zram0/queue/read_ahead_kb ]; then
+            echo 0 > /sys/block/zram0/queue/read_ahead_kb 2>/dev/null || ZRAM_OK=0
+        else
+            ZRAM_OK=0
+        fi
+        [ "$ZRAM_OK" = 1 ] && touch "$STATE/tuning.zram"
+    fi
+
+    if [ -f "$STATE/tuning.network" ] && [ -f "$STATE/tuning.mss.ipv4" ] &&
+        [ -f "$STATE/tuning.mss.ipv6" ] && [ -f "$STATE/tuning.scheduler" ] &&
+        [ -f "$STATE/tuning.zram" ]; then
+        touch "$STATE/tuning"
+    fi
 fi
 
 echo "=== load_drivers finished ($STAGE) ==="

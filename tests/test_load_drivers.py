@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,9 @@ elif name in ("modprobe", "insmod"):
     loaded = modules.read_text().splitlines()
     if module not in loaded:
         with modules.open("a") as f: f.write(module + "\n")
+    state = root / "sys/module" / module / "initstate"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("live\n")
 elif name == "pgrep":
     if not config.get("hal_running", False): sys.exit(1)
     print(1234)
@@ -81,6 +85,10 @@ class AndroidSandbox:
         self.path("/data/adb").mkdir(parents=True)
         self.path("/proc/sys/kernel/random").mkdir(parents=True)
         self.path("/proc/sys/kernel/random/boot_id").write_text("boot-one\n")
+        self.path("/proc/sys/kernel/sched_schedstats").touch()
+        self.path("/proc/sys/net/ipv4").mkdir(parents=True)
+        self.path("/proc/sys/net/ipv4/tcp_mtu_probing").touch()
+        self.path("/proc/sys/net/ipv6").mkdir(parents=True)
         self.path("/sys/class/sec/tsp").mkdir(parents=True)
         self.path("/sys/class/sec/tsp/cmd").touch()
         self.path("/sys/class/sec/tsp/cmd_result").write_text("OK\n")
@@ -103,13 +111,13 @@ class AndroidSandbox:
         self.path("/data/adb/ksud").symlink_to(dispatcher)
         # Rewrite every Android absolute path, not merely commands. Redirections,
         # globs, module names and the kernel boot ID all stay inside the tempdir.
-        prefixes = ("/proc/sys/kernel/random/boot_id", "/system/bin", "/vendor_dlkm", "/data", "/dev", "/sys")
-        pattern = "|".join(re.escape(prefix) + r"(?=/|\b)" for prefix in prefixes)
+        prefixes = ("/proc", "/system/bin", "/vendor_dlkm", "/data", "/dev", "/sys")
+        pattern = r"(?<![A-Za-z0-9_./-])(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + r")(?=/|\b)"
         self.transformed = re.sub(pattern, lambda match: str(self.path(match.group())), source)
         self.transformed = self.transformed.replace("#!" + str(self.bin / "sh"), "#!/bin/sh", 1)
         # Refuse an unhandled absolute Android path before executing any shell.
         checked = self.transformed
-        for prefix in ("/proc/sys/kernel/random/boot_id", "/system/bin", "/vendor_dlkm", "/data", "/dev", "/sys"):
+        for prefix in ("/proc", "/system/bin", "/vendor_dlkm", "/data", "/dev", "/sys"):
             checked = checked.replace(str(self.path(prefix)), "SANDBOX")
         if re.search(r"(?<![A-Za-z0-9_-])/(?:system|vendor|vendor_dlkm|data|dev|sys|proc)(?:/|\b)", checked):
             raise AssertionError("Unmapped Android absolute path")
@@ -117,6 +125,18 @@ class AndroidSandbox:
 
     def path(self, android):
         return self.root / android.lstrip("/")
+
+    def set_modules(self, names):
+        (self.root / "modules").write_text(names)
+        directory = self.path("/sys/module")
+        directory.mkdir(parents=True, exist_ok=True)
+        for module in directory.iterdir():
+            (module / "initstate").unlink()
+            module.rmdir()
+        for name in names.splitlines():
+            module = directory / name
+            module.mkdir()
+            (module / "initstate").write_text("live\n")
 
     def configure(self, **kwargs):
         self.config = kwargs
@@ -130,7 +150,7 @@ class AndroidSandbox:
         return script
 
     def start(self, stage="service.d", arg=None):
-        command = ["/bin/sh", str(self.script(stage))]
+        command = shlex.split(os.environ.get("LOAD_DRIVERS_TEST_SHELL", "/bin/sh")) + [str(self.script(stage))]
         if arg is not None:
             command.append(arg)
         return subprocess.Popen(command, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -191,7 +211,7 @@ class LoadDriversTests(unittest.TestCase):
         if not LEGACY_TUNING:
             self.assertEqual(a.calls("sysctl"), first_tuning)
         self.assertEqual(len(a.calls("modprobe", "dhd")), 1)
-        self.assertGreaterEqual(len(a.calls("lsmod")), 3)
+        self.assertEqual(a.calls("lsmod"), [])
 
     def test_concurrent_repeats_are_serialized(self):
         a = self.android
@@ -202,7 +222,9 @@ class LoadDriversTests(unittest.TestCase):
         self.assertEqual(len(a.calls("modprobe", "dhd")), 1)
         self.assertEqual(len(a.repairs()), 1)
         if not LEGACY_TUNING:
-            self.assertEqual(len(a.calls("sysctl", "net.ipv4.ip_forward=1")), 1)
+            self.assertEqual(a.calls("sysctl"), [])
+            self.assertEqual(a.calls("iptables"), [])
+            self.assertEqual(a.calls("ip6tables"), [])
         self.assertTrue(a.calls("flock", "-n 9"))
 
     def test_concurrent_different_stages_eventually_repair_once_each(self):
@@ -262,7 +284,7 @@ class LoadDriversTests(unittest.TestCase):
         self.assertEqual(len(a.repairs()), 3)
         self.assertEqual(len(a.calls("modprobe", "dhd")), 1)
         if not LEGACY_TUNING:
-            self.assertEqual(len(a.calls("sysctl", "net.ipv4.ip_forward=1")), 1)
+            self.assertEqual(len(a.calls("sysctl", "net.ipv4.tcp_mtu_probing=1")), 1)
 
     def test_explicit_stages_override_location_and_manual_defaults_to_service(self):
         a = self.android
@@ -285,7 +307,7 @@ class LoadDriversTests(unittest.TestCase):
     def test_module_presence_is_checked_after_stage_completed(self):
         a = self.android
         a.run()
-        (a.root / "modules").write_text("fingerprint_sysfs\nfingerprint\n")
+        a.set_modules("fingerprint_sysfs\nfingerprint\n")
         a.run()
         self.assertEqual(len(a.calls("modprobe", "dhd")), 2)
 
@@ -333,7 +355,7 @@ class LoadDriversTests(unittest.TestCase):
     def test_fingerprint_module_reload_reapplies_repairs(self):
         a = self.android
         a.run()
-        (a.root / "modules").write_text("dhd\nfingerprint_sysfs\n")
+        a.set_modules("dhd\nfingerprint_sysfs\n")
         a.run()
         a.run()
         self.assertEqual(len(a.repairs()), 2)
@@ -341,12 +363,12 @@ class LoadDriversTests(unittest.TestCase):
     @unittest.skipIf(LEGACY_TUNING, "deployment intentionally retains legacy tuning")
     def test_failed_tuning_is_retried_then_coalesced(self):
         a = self.android
-        a.configure(fail=["sysctl -w net.ipv4.ip_forward=1"])
+        a.configure(fail=["sysctl -w net.ipv4.tcp_mtu_probing=1"])
         a.run()
         a.configure()
         a.run()
         a.run()
-        self.assertEqual(len(a.calls("sysctl", "net.ipv4.ip_forward=1")), 2)
+        self.assertEqual(len(a.calls("sysctl", "net.ipv4.tcp_mtu_probing=1")), 2)
 
     @unittest.skipIf(LEGACY_TUNING, "deployment intentionally retains legacy tuning")
     def test_unavailable_zram_is_retried_at_later_stage(self):
@@ -355,12 +377,12 @@ class LoadDriversTests(unittest.TestCase):
         queue.unlink()
         queue.parent.rmdir()
         queue.parent.parent.rmdir()
-        a.run("post-fs-data.d")
+        a.run()
         queue.parent.mkdir(parents=True)
         queue.write_text("128\n")
         a.run()
         a.run("boot-completed.d")
-        self.assertEqual(len(a.calls("sysctl", "net.ipv4.ip_forward=1")), 2)
+        self.assertEqual(len(a.calls("sysctl", "net.ipv4.tcp_mtu_probing=1")), 1)
         self.assertEqual(queue.read_text().strip(), "0")
 
     def test_reboot_uses_fresh_state(self):
@@ -370,7 +392,7 @@ class LoadDriversTests(unittest.TestCase):
         a.run()
         self.assertEqual(len(a.repairs()), 2)
         if not LEGACY_TUNING:
-            self.assertEqual(len(a.calls("sysctl", "net.ipv4.ip_forward=1")), 2)
+            self.assertEqual(len(a.calls("sysctl", "net.ipv4.tcp_mtu_probing=1")), 2)
         self.assertTrue(a.path("/data/adb/load_drivers-state/boot-one").is_dir())
         self.assertTrue(a.path("/data/adb/load_drivers-state/boot-two").is_dir())
 
@@ -493,7 +515,7 @@ class LoadDriversTests(unittest.TestCase):
         self.assertEqual([c for c in a.calls("modprobe") if c[-1] == "fingerprint"], [])
         self.assertTrue(a.calls("modprobe", "fingerprint_sysfs"))
         patched.unlink()
-        (a.root / "modules").write_text("dhd\nfingerprint_sysfs\n")
+        a.set_modules("dhd\nfingerprint_sysfs\n")
         a.run()
         self.assertEqual(len([c for c in a.calls("modprobe") if c[-1] == "fingerprint"]), 1)
 
@@ -516,11 +538,67 @@ class LoadDriversTests(unittest.TestCase):
     def test_tuning_values_preserved(self):
         a = self.android
         a.run()
-        expected = {"net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1", "net.ipv4.tcp_mtu_probing=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2", "net.ipv4.tcp_fastopen=3", "net.core.rmem_max=8388608", "net.core.wmem_max=8388608", "net.ipv4.tcp_rmem=4096 87380 8388608", "net.ipv4.tcp_wmem=4096 65536 8388608", "kernel.sched_schedstats=0", "vm.page-cluster=0"}
+        expected = {"net.ipv4.tcp_mtu_probing=1", "kernel.sched_schedstats=0", "vm.page-cluster=0"}
         self.assertEqual({c[-1] for c in a.calls("sysctl")}, expected)
         self.assertEqual(a.path("/sys/block/zram0/queue/read_ahead_kb").read_text().strip(), "0")
         for command in ("iptables", "ip6tables"):
             self.assertTrue(a.calls(command, "-A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"))
+
+    def test_module_checks_and_completed_repeats_do_not_spawn_helpers(self):
+        a = self.android
+        a.run()
+        calls = a.calls()
+        a.run()
+        self.assertEqual(a.calls("lsmod"), [])
+        self.assertEqual([call for call in a.calls() if call[0] != "flock"],
+                         [call for call in calls if call[0] != "flock"])
+
+    def test_module_still_initializing_is_not_treated_as_live(self):
+        a = self.android
+        a.set_modules("dhd\nfingerprint_sysfs\nfingerprint\n")
+        a.path("/sys/module/dhd/initstate").write_text("coming\n")
+        a.run()
+        self.assertEqual(len(a.calls("modprobe", "dhd")), 1)
+
+    def test_late_wait_includes_ipc_node(self):
+        a = self.android
+        a.path("/dev/qbt2000_ipc").unlink()
+        a.run()
+        self.assertEqual(len(a.calls("sleep")), 5)
+        self.assertFalse(a.path("/data/adb/load_drivers-state/boot-one/service.repairs").exists())
+
+    @unittest.skipIf(LEGACY_TUNING, "deployment intentionally retains legacy tuning")
+    def test_unsupported_scheduler_stats_do_not_repeat_other_tuning(self):
+        a = self.android
+        a.path("/proc/sys/kernel/sched_schedstats").unlink()
+        a.run()
+        a.run()
+        self.assertEqual(a.calls("sysctl", "kernel.sched_schedstats"), [])
+        self.assertEqual(len(a.calls("sysctl", "net.ipv4.tcp_mtu_probing=1")), 1)
+        self.assertTrue(a.path("/data/adb/load_drivers-state/boot-one/tuning").is_file())
+
+    @unittest.skipIf(LEGACY_TUNING, "deployment intentionally retains legacy tuning")
+    def test_absent_ipv6_does_not_block_success(self):
+        a = self.android
+        a.path("/proc/sys/net/ipv6").rmdir()
+        a.run()
+        self.assertEqual(a.calls("ip6tables"), [])
+        self.assertTrue(a.path("/data/adb/load_drivers-state/boot-one/tuning").is_file())
+
+    @unittest.skipIf(LEGACY_TUNING, "deployment intentionally retains legacy tuning")
+    def test_failed_firewall_family_retries_without_replaying_successes(self):
+        a = self.android
+        a.configure(fail=["ip6tables"])
+        a.run()
+        ipv4 = a.calls("iptables")
+        settings = a.calls("sysctl")
+        a.configure()
+        a.run()
+        a.run()
+        self.assertEqual(a.calls("iptables"), ipv4)
+        self.assertEqual(a.calls("sysctl"), settings)
+        self.assertEqual(len(a.calls("ip6tables", "-A POSTROUTING")), 2)
+        self.assertTrue(all(call[1:3] == ["-w", "1"] for call in a.calls("ip6tables")))
 
 
 if __name__ == "__main__":

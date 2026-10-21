@@ -40,7 +40,7 @@ as processing /vendor_dlkm, so dhd never loads from there either: no Wi-Fi.
 Removing exactly those five:
 
   * the fragment completes, so nothing after them is skipped;
-  * `bcm43xx` (now at 174) loads, so Bluetooth works;
+  * `bcm43xx` (now at 179) loads, so Bluetooth works;
   * init proceeds to /vendor_dlkm, which loads dhd and the fingerprint modules
     with /vendor available, so Wi-Fi and fingerprint work.
 
@@ -95,10 +95,10 @@ def stem(name):
 
 
 def load_vendor_dlkm_list():
-    """Read /vendor_dlkm's own modules.load, if the extracted image is around."""
+    """Require /vendor_dlkm's own load list before deferring its drivers."""
     path = os.path.join(BASE, "work", "dlkm", "lib", "modules", "modules.load")
     if not os.path.isfile(path):
-        return None
+        raise SystemExit("missing %s -- cannot verify late driver loading" % path)
     with open(path) as handle:
         return {stem(line.strip()) for line in handle if line.strip()}
 
@@ -123,16 +123,11 @@ def main():
     # The drop set must be exactly what /vendor_dlkm promises to load. If it is
     # not, we would be deleting a module nothing else provides.
     vendor_list = load_vendor_dlkm_list()
-    if vendor_list is not None:
-        missing = DROP - vendor_list
-        if missing:
-            raise SystemExit(
-                "these are dropped from the fragment but absent from "
-                "/vendor_dlkm's list, so nothing would load them: %s"
-                % ", ".join(sorted(missing)))
-        print("/vendor_dlkm covers  : %s" % ", ".join(sorted(vendor_list)))
-    else:
-        print("/vendor_dlkm covers  : (work/dlkm not present, skipped cross-check)")
+    if vendor_list != DROP:
+        raise SystemExit(
+            "vendor_dlkm load list differs from the verified five-driver set; "
+            "refusing an unverified early/late module split")
+    print("/vendor_dlkm covers  : %s" % ", ".join(sorted(vendor_list)))
 
     dropped = [n for n in raw if stem(n) in DROP]
     if not dropped:
@@ -158,11 +153,9 @@ def main():
     # Not one of the dropped modules may remain, and no dropped module's own
     # dependency may now be orphaned from the fragment's point of view -- the
     # fragment simply no longer mentions them at all.
-    leftover = (DROP - {"dhd"} if append_last else DROP) & set(after)
+    leftover = DROP & set(after)
     if leftover:
         raise SystemExit("still present after patch: %s" % ", ".join(sorted(leftover)))
-    if append_last and after[-1] != "dhd":
-        raise SystemExit("dhd is not the final entry")
 
     if os.path.isdir(STAGE):
         shutil.rmtree(STAGE)

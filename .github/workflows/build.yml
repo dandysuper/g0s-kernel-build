@@ -3,18 +3,66 @@ name: Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    paths: ['**.py', '**.sh', '.github/workflows/build.yml']
+  pull_request:
+    paths: ['**.py', '**.sh', '.github/workflows/build.yml']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install shell and image verification tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck mksh busybox cpio lz4 erofs-utils
+      - name: Host-safe regressions and shell checks
+        run: |
+          python3 -m unittest discover -s tests -v
+          LOAD_DRIVERS_TEST_SHELL=mksh python3 -m unittest discover -s tests -p test_load_drivers.py -q
+          LOAD_DRIVERS_TEST_SHELL='busybox ash' python3 -m unittest discover -s tests -p test_load_drivers.py -q
+          shellcheck -s sh load_drivers.sh
+          sh -n load_drivers.sh
+          sh -n tests/probe_android_lock.sh
+          git diff --check
+
   build:
-    # ThinLTO roughly doubles link time versus LTO_NONE, so the ceiling moves
-    # from 240 to 350 minutes to keep a slow runner from masking a real failure.
+    if: github.event_name == 'workflow_dispatch'
+    needs: checks
     runs-on: ubuntu-22.04
     timeout-minutes: 350
+    concurrency:
+      group: g0s-kernel-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: g0s
+      KBUILD_BUILD_HOST: github-actions
+      KBUILD_BUILD_VERSION: '1'
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: '1'
+      # The old next branch is gone; v3.4.2 is UAPI 5, not UAPI 6.
+      KSU_REF: b427a3f9c2421a443f961007bfce66b25486643f
 
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Checkout kernel source
         run: |
           set -e
@@ -22,7 +70,11 @@ jobs:
             https://github.com/ExtremeXT/android_kernel_samsung_s5e9925.git kernel
           cd kernel
           echo "HEAD: $(git log -1 --oneline)"
-          echo "VERSION=$(make kernelversion 2>/dev/null || true)" >> $GITHUB_ENV
+          {
+            echo "VERSION=$(make -s kernelversion)"
+            echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)"
+            echo "KBUILD_BUILD_TIMESTAMP=$(git show -s --format=%cD HEAD)"
+          } >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |
@@ -33,24 +85,37 @@ jobs:
             libelf-dev libssl-dev liblz4-tool lz4 lzop \
             python3 rsync xz-utils zip unzip zlib1g-dev kmod device-tree-compiler
 
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: g0s-ccache-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            g0s-ccache-v1-${{ runner.os }}-${{ github.ref_name }}-
+            g0s-ccache-v1-${{ runner.os }}-
+
       - name: Fetch clang toolchain
         run: |
           set -e
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
             clang-prebuilt
-          echo "$PWD/clang-prebuilt/bin" >> $GITHUB_PATH
+          echo "$PWD/clang-prebuilt/bin" >> "$GITHUB_PATH"
           "$PWD/clang-prebuilt/bin/clang" --version
+          ccache --max-size=1G
+          ccache --zero-stats
 
       - name: Apply KernelSU Next
         run: |
           set -e
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          echo "--- KSU Kconfig present? ---"
-          grep -rn "config KSU" drivers/Kconfig drivers/kernelsu/Kconfig 2>/dev/null || true
-          echo "--- drivers/kernelsu ---"
-          ls -la drivers/kernelsu 2>/dev/null | head
+          curl --fail --location --show-error --retry 3 \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/$KSU_REF/kernel/setup.sh" \
+            --output "$RUNNER_TEMP/setup-ksu.sh"
+          bash "$RUNNER_TEMP/setup-ksu.sh" "$KSU_REF"
+          test "$(git -C KernelSU-Next rev-parse HEAD)" = "$KSU_REF"
+          grep -Eq 'KERNEL_SU_UAPI_VERSION[[:space:]]*=[[:space:]]*6;' KernelSU-Next/uapi/supercall.h
+          test -f drivers/kernelsu/Kconfig
 
       - name: Configure (g0s, not r11s)
         run: |
@@ -60,16 +125,11 @@ jobs:
           export SUBARCH=arm64
           export PATH="$PWD/../clang-prebuilt/bin:$PATH"
 
-          # Every kconfig invocation needs the toolchain variables, not just the
-          # defconfig call. CONFIG_LTO_CLANG_THIN lives behind a choice that
-          # requires CONFIG_CC_IS_CLANG and CONFIG_LLD_VERSION, and those are
-          # probed from CC/LD at configure time. Running olddefconfig bare made
-          # the tree probe the host gcc/ld, conclude LTO_CLANG was unavailable,
-          # and silently force CONFIG_LTO_NONE - which then inflated the Image
-          # and every module by 1.84x.
-          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+          # Keep compiler probes consistent across every Kconfig invocation.
+          # This Samsung tree has no LTO choice; KASAN caused the measured bloat.
+          MAKE_ARGS=(O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-)
 
-          make -j$(nproc) $MAKE_ARGS s5e9925_defconfig
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" s5e9925_defconfig
 
           scripts/kconfig/merge_config.sh -m -O out \
             out/.config arch/arm64/configs/g0s.config
@@ -131,8 +191,20 @@ jobs:
           scripts/config --file out/.config --enable DEBUG_INFO_NONE
           scripts/config --file out/.config --disable INIT_ON_ALLOC_DEFAULT_ON
           scripts/config --file out/.config --disable INIT_ON_FREE_DEFAULT_ON
+          scripts/config --file out/.config --enable CC_OPTIMIZE_FOR_PERFORMANCE
+          scripts/config --file out/.config --disable CC_OPTIMIZE_FOR_SIZE
 
-          make -j$(nproc) $MAKE_ARGS olddefconfig
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" olddefconfig
+
+          # PSI/cgroups/uclamp underpin Android LMKD and task profiles; keep
+          # those runtime mechanisms instead of replacing them with boot tweaks.
+          for symbol in MACH_G0S_EUR_OPENX CC_IS_CLANG LD_IS_LLD CC_OPTIMIZE_FOR_PERFORMANCE \
+              PSI MEMCG MEMCG_SWAP CGROUPS CPUSETS UCLAMP_TASK UCLAMP_TASK_GROUP \
+              BPF_SYSCALL BPF_JIT_ALWAYS_ON CGROUP_BPF MODULES MODVERSIONS; do
+            grep -qx "CONFIG_${symbol}=y" out/.config || {
+              echo "FATAL: required Android/g0s config CONFIG_${symbol}=y missing"; exit 1;
+            }
+          done
 
           # If KASAN survives, the build is ~2x too big and the modules will not
           # fit. Fail here in 5 minutes rather than 90 minutes later.
@@ -165,14 +237,14 @@ jobs:
           fi
           echo "All config gates passed."
 
-      - name: Build kernel image
+      - name: Build kernel image and modules
         run: |
           set -e
           cd kernel
           export ARCH=arm64
           export PATH="$PWD/../clang-prebuilt/bin:$PATH"
-          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
-          make -j$(nproc) $MAKE_ARGS Image
+          MAKE_ARGS=(O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-)
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image
           ls -lh out/arch/arm64/boot/Image
 
       - name: Build modules
@@ -181,10 +253,10 @@ jobs:
           cd kernel
           export ARCH=arm64
           export PATH="$PWD/../clang-prebuilt/bin:$PATH"
-          MAKE_ARGS="O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
-          make -j$(nproc) $MAKE_ARGS modules
+          MAKE_ARGS=(O=out "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-)
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" modules
           rm -rf ../modules_out
-          make -j$(nproc) $MAKE_ARGS \
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" \
             INSTALL_MOD_PATH="$PWD/../modules_out" \
             modules_install
 

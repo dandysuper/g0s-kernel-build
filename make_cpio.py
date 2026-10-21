@@ -1,59 +1,84 @@
-import os, sys
+import argparse
+import os
+import shutil
+import stat
+import tempfile
+
+
+COPY_BUFFER_SIZE = 1024 * 1024
+
+
+def write_header(output, name, ino, mode, size=0, links=1):
+    name_bytes = os.fsencode(name) + b"\x00"
+    # newc uses 13 fixed-width 32-bit fields, root ownership and zero mtimes.
+    fields = (ino, mode, 0, 0, links, 0, size, 0, 0, 0, 0, len(name_bytes), 0)
+    if any(value < 0 or value > 0xffffffff for value in fields):
+        raise ValueError(f"newc field exceeds 32 bits: {name}")
+    output.write(b"070701" + "".join(f"{value:08x}" for value in fields).encode("ascii"))
+    output.write(name_bytes)
+    output.write(b"\x00" * (-(110 + len(name_bytes)) % 4))
+
+
+def entries(directory, prefix=""):
+    with os.scandir(directory) as iterator:
+        children = sorted(iterator, key=lambda entry: entry.name)
+    for child in children:
+        name = f"{prefix}/{child.name}" if prefix else child.name
+        info = child.stat(follow_symlinks=False)
+        yield child.path, name, info
+        if stat.S_ISDIR(info.st_mode):
+            yield from entries(child.path, name)
+
 
 def write_cpio(src_dir, out_file):
-    with open(out_file, "wb") as out:
-        ino = 1
-        for root, dirs, files in os.walk(src_dir):
-            dirs.sort()
-            files.sort()
-            rel_root = os.path.relpath(root, src_dir)
-            if rel_root == ".":
-                rel_root = ""
-            
-            # Write dir entry if not root
-            if rel_root:
-                name_bytes = rel_root.encode("utf-8") + b"\x00"
-                namesize = len(name_bytes)
-                mode = 0o40755
-                filesize = 0
-                hdr = f"070701{ino:08x}{mode:08x}{0:08x}{0:08x}{2:08x}{0:08x}{filesize:08x}{0:08x}{0:08x}{0:08x}{0:08x}{namesize:08x}{0:08x}".encode("ascii")
-                out.write(hdr)
-                out.write(name_bytes)
-                pad1 = (4 - ((110 + namesize) % 4)) % 4
-                out.write(b"\x00" * pad1)
-                ino += 1
+    source = os.path.realpath(src_dir)
+    destination = os.path.realpath(out_file)
+    if not os.path.isdir(source):
+        raise NotADirectoryError(src_dir)
+    if os.path.commonpath((source, destination)) == source:
+        raise ValueError("archive output must be outside the source tree")
+    directory = os.path.dirname(os.path.abspath(out_file))
+    with tempfile.NamedTemporaryFile(prefix=".ramdisk-", dir=directory, delete=False) as output:
+        temporary = output.name
+        try:
+            for ino, (path, name, info) in enumerate(entries(source), 1):
+                if stat.S_ISDIR(info.st_mode):
+                    # Write directory entries before their children.
+                    write_header(output, name, ino, 0o40755, links=2)
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    data = os.fsencode(os.readlink(path))
+                    write_header(output, name, ino, 0o120777, len(data))
+                    output.write(data)
+                    size = len(data)
+                elif stat.S_ISREG(info.st_mode):
+                    mode = 0o100755 if info.st_mode & 0o111 else 0o100644
+                    size = info.st_size
+                    write_header(output, name, ino, mode, size)
+                    start = output.tell()
+                    with open(path, "rb") as content_file:
+                        shutil.copyfileobj(content_file, output, COPY_BUFFER_SIZE)
+                    if output.tell() - start != size:
+                        raise ValueError(f"source changed while archiving: {name}")
+                else:
+                    raise ValueError(f"unsupported ramdisk entry type: {name}")
+                output.write(b"\x00" * (-size % 4))
 
-            for f in files:
-                full_path = os.path.join(root, f)
-                rel_path = os.path.join(rel_root, f) if rel_root else f
-                name_bytes = rel_path.encode("utf-8") + b"\x00"
-                namesize = len(name_bytes)
-                st = os.stat(full_path)
-                mode = 0o100644
-                filesize = st.st_size
-                hdr = f"070701{ino:08x}{mode:08x}{0:08x}{0:08x}{1:08x}{0:08x}{filesize:08x}{0:08x}{0:08x}{0:08x}{0:08x}{namesize:08x}{0:08x}".encode("ascii")
-                out.write(hdr)
-                out.write(name_bytes)
-                pad1 = (4 - ((110 + namesize) % 4)) % 4
-                out.write(b"\x00" * pad1)
-                with open(full_path, "rb") as content_file:
-                    out.write(content_file.read())
-                pad2 = (4 - (filesize % 4)) % 4
-                out.write(b"\x00" * pad2)
-                ino += 1
+            # Trailer, then standard 512-byte archive alignment.
+            write_header(output, "TRAILER!!!", 0, 0)
+            output.write(b"\x00" * (-output.tell() % 512))
+            output.flush()
+            os.fsync(output.fileno())
+            output.close()
+            os.replace(temporary, out_file)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
-        # Trailer
-        trailer_name = b"TRAILER!!!\x00"
-        namesize = len(trailer_name)
-        hdr = f"070701{0:08x}{0:08x}{0:08x}{0:08x}{1:08x}{0:08x}{0:08x}{0:08x}{0:08x}{0:08x}{0:08x}{namesize:08x}{0:08x}".encode("ascii")
-        out.write(hdr)
-        out.write(trailer_name)
-        pad = (4 - ((110 + namesize) % 4)) % 4
-        out.write(b"\x00" * pad)
-        # Pad to 512 bytes alignment if needed, standard cpio does:
-        curr_pos = out.tell()
-        pad512 = (512 - (curr_pos % 512)) % 512
-        out.write(b"\x00" * pad512)
 
 if __name__ == "__main__":
-    write_cpio(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser(description="Write a deterministic Android newc ramdisk")
+    parser.add_argument("source")
+    parser.add_argument("output")
+    args = parser.parse_args()
+    write_cpio(args.source, args.output)
