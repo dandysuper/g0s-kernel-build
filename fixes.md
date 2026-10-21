@@ -204,8 +204,7 @@ Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/l
 | **VPN Tunnel** | `dumpsys vpn_management` | Connected, validated, no disconnect loops |
 | **VPN Throughput** | `curl -s https://speed.cloudflare.com` | ~3.5 MB/s (~28 Mbps) sustained throughput |
 | **TCP Clamping** | `iptables -t mangle -S POSTROUTING` | `TCPMSS --clamp-mss-to-pmtu` active for IPv4 & IPv6 |
-| **UFS Cache Affinity**| `/sys/block/sda/queue/rq_affinity` | `2` (local core request completion) |
-| **ZRAM Paging** | `/sys/block/zram0/queue/read_ahead_kb` | `0` (zero redundant decompression) |
+| **ZRAM Paging** | `/sys/block/zram0/queue/read_ahead_kb` | `0` (block read-ahead disabled) |
 
 ---
 
@@ -231,22 +230,23 @@ Permissions: `chmod 0755 /data/adb/{post-fs-data.d,service.d,boot-completed.d}/l
 
 ---
 
-## 8. VPN Connectivity, Routing & Kernel Performance/Efficiency Tuning
+## 8. VPN Connectivity & Runtime Efficiency
 
 ### 8.1 VPN Stalling, Dropouts & Handshake Timeouts
 - **Root Cause A (Path MTU Black Hole):** VPN tunnels (WireGuard, OpenVPN, Cloudflare WARP MASQUE/QUIC) encapsulate network packets, reducing the usable MTU from 1500 bytes to 1280–1420 bytes. Under default Android sysctl `net.ipv4.tcp_mtu_probing = 0`, intermediate hops or tunnel endpoints that drop oversized packets with the Don't Fragment (DF) bit set without returning ICMP Fragmentation Needed create a "black hole". This caused connections to stall or drop after 15–20 seconds.
 - **Root Cause B (TCP MSS Mismatch):** When client sockets initiate connections with standard MSS (1460 bytes for IPv4, 1440 for IPv6), encapsulated packets exceed tunnel MTU. Without TCP MSS Clamping, fragmented packets were discarded by strict carrier middleboxes.
 - **Root Cause C (Strict Asymmetric Routing Drops):** On dual-connection devices (Wi-Fi + Cellular + VPN), strict reverse-path filtering (`rp_filter = 1`) dropped return packets whose ingress interface differed from the default outbound route.
 
-### 8.2 Performance & Battery Efficiency Bottlenecks
-- **Scheduler Accounting Overhead:** `kernel.sched_schedstats = 1` maintained continuous per-task scheduler statistics on every context switch and tick across all 8 cores, wasting CPU cycles in the background.
-- **Process Fork Latency:** `kernel.sched_child_runs_first = 0` yielded CPU to the parent process first upon `fork()`, adding measurable latency to app launch animations.
-- **UFS 3.1 Interrupt Locality:** `rq_affinity = 1` allowed block I/O completion interrupts to execute on arbitrary CPU cores rather than the requesting core, triggering cross-core cache invalidations and L2/L3 cache misses.
-- **ZRAM Decompression Churn:** `read_ahead_kb = 128` forced the kernel to read and decompress 128 KB chunks from ZRAM even when only a 4 KB page was needed. Because ZRAM is compressed RAM with zero seek time, read-ahead only wasted CPU cycles and battery.
-- **VFS Cache Premature Reclaim:** Default `vm.vfs_cache_pressure = 100` aggressively reclaimed directory and inode caches, requiring frequent re-reads of filesystem metadata during app switching.
+### 8.2 RAM Management & Efficiency
+The runtime tuning is intentionally limited to settings directly related to ZRAM swap-in behavior:
+- `vm.page-cluster = 0` disables clustered swap reads. With compressed RAM, speculative neighboring-page reads can add decompression and memory-bandwidth work without a storage seek benefit.
+- `/sys/block/zram0/queue/read_ahead_kb = 0` disables block-layer read-ahead for ZRAM. It is applied only when ZRAM exists and the queue control is writable.
+- `kernel.sched_schedstats = 0` disables optional scheduler-statistics accounting; it does not change scheduling policy.
+
+Android remains responsible for `vm.swappiness`, ZRAM size, and CPU governor policy. The script no longer forces scheduler fork behavior, VFS cache pressure, or UFS queue/affinity settings: those choices can trade responsiveness, memory use, and power differently across workloads. Any battery-life improvement from less speculative swap-in work is a hypothesis; no battery or performance benchmark has been run.
 
 ### 8.3 Tuning Implementation
-All optimizations are executed automatically on boot via `/data/adb/service.d/load_drivers.sh` and `/data/adb/boot-completed.d/load_drivers.sh`:
+The existing network and runtime settings are attempted by `load_drivers.sh`; unsupported or unavailable sysctls are ignored. ZRAM-specific tuning is guarded by the presence of `/sys/block/zram0`:
 ```bash
 # Network & VPN Packet Flow Fixes
 sysctl -w net.ipv4.ip_forward=1
@@ -266,12 +266,16 @@ iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --cla
 ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
   ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
-# Kernel Scheduler & Storage Optimization
+# Scheduler accounting only; no scheduling-policy change
 sysctl -w kernel.sched_schedstats=0
-sysctl -w kernel.sched_child_runs_first=1
-sysctl -w vm.vfs_cache_pressure=80
-echo 2 > /sys/block/sda/queue/rq_affinity
-echo 0 > /sys/block/sda/queue/iostats
-echo 128 > /sys/block/sda/queue/nr_requests
-echo 0 > /sys/block/zram0/queue/read_ahead_kb
+
+# Apply swap-in tuning only when ZRAM is available
+if [ -d /sys/block/zram0 ]; then
+  sysctl -w vm.page-cluster=0
+  if [ -w /sys/block/zram0/queue/read_ahead_kb ]; then
+    echo 0 > /sys/block/zram0/queue/read_ahead_kb
+  fi
+fi
 ```
+
+For on-device verification, check `cat /proc/sys/vm/page-cluster` and `cat /sys/block/zram0/queue/read_ahead_kb` when the corresponding ZRAM nodes exist. These values verify configuration only; battery impact requires a controlled device-side measurement.
