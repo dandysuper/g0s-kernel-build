@@ -135,23 +135,18 @@ echo "Applying Network & VPN optimizations..."
 iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
-# 11. Kernel Performance & Battery Efficiency Tuning
-echo "Applying Kernel Performance & Battery optimizations..."
-# Scheduler & interactive UI latency
+# 11. Conservative memory and battery-efficiency tuning
+echo "Applying conservative memory & efficiency tuning..."
+# Scheduler statistics are diagnostic accounting, not a scheduling policy.
 /system/bin/sysctl -w kernel.sched_schedstats=0 >/dev/null 2>&1 || true
-/system/bin/sysctl -w kernel.sched_child_runs_first=1 >/dev/null 2>&1 || true
-/system/bin/sysctl -w vm.vfs_cache_pressure=80 >/dev/null 2>&1 || true
 
-# UFS 3.1 storage throughput & cache locality
-if [ -d /sys/block/sda/queue ]; then
-    echo 2 > /sys/block/sda/queue/rq_affinity 2>/dev/null || true
-    echo 0 > /sys/block/sda/queue/iostats 2>/dev/null || true
-    echo 128 > /sys/block/sda/queue/nr_requests 2>/dev/null || true
-fi
-
-# ZRAM decompression efficiency (prevents redundant read-ahead from compressed RAM)
-if [ -d /sys/block/zram0/queue ]; then
-    echo 0 > /sys/block/zram0/queue/read_ahead_kb 2>/dev/null || true
+# Avoid clustered swap-in and block read-ahead for compressed RAM. Leave Android's
+# swappiness, ZRAM sizing, CPU governor, and storage queue policy untouched.
+if [ -d /sys/block/zram0 ]; then
+    /system/bin/sysctl -w vm.page-cluster=0 >/dev/null 2>&1 || true
+    if [ -w /sys/block/zram0/queue/read_ahead_kb ]; then
+        echo 0 > /sys/block/zram0/queue/read_ahead_kb 2>/dev/null || true
+    fi
 fi
 
 echo "=== load_drivers finished ==="

@@ -20,8 +20,8 @@ All pre-patched, ready-to-flash partition images and modules are included direct
 | **Display / Touch** | ✅ | 120 Hz Dynamic AMOLED, capacitive touchscreen (`stm_ts_spi`) |
 | **Audio / Calls / BT** | ✅ | Functional |
 | **VPN & Tunnels** | ✅ | WireGuard, OpenVPN, Cloudflare WARP (MASQUE/QUIC), TCP MSS clamping, MTU auto-probing |
-| **Storage & I/O** | ✅ | UFS 3.1 request affinity core-pinned (`rq_affinity=2`), zero-overhead iostats |
-| **Battery & CPU** | ✅ | Scheduler profiling disabled (`schedstats=0`), zero-churn ZRAM paging (`read_ahead_kb=0`) |
+| **Storage & I/O** | ✅ | Android-managed queue and affinity settings are left unchanged |
+| **Memory & efficiency** | Configured | ZRAM swap clustering/read-ahead disabled; battery impact is not benchmarked |
 
 ---
 
@@ -52,8 +52,11 @@ All pre-patched, ready-to-flash partition images and modules are included direct
    - **Fix:** TSP FOD active rectangle configured + proper enrollment technique documented.
 
 6. **VPN Drops, Path MTU Black Holes & Latency Optimization:**
-   - Under standard Android 17 network settings, VPN tunnels encapsulating packets reduce the usable MTU below 1500 bytes. With `net.ipv4.tcp_mtu_probing = 0` and un-clamped TCP MSS, packets with the Don't Fragment (DF) bit set are silently discarded by intermediate routers, causing VPNs to stall, timeout, or drop connections. Additionally, background scheduler statistics and UFS interrupt contention increased latency.
-   - **Fix:** Automated PLPMTUD (`net.ipv4.tcp_mtu_probing = 1`), IPv4 & IPv6 TCP MSS Clamping (`--clamp-mss-to-pmtu`), loose reverse path filtering (`rp_filter = 2`), and UFS interrupt affinity core-pinning (`rq_affinity = 2`) with zero-overhead ZRAM paging (`read_ahead_kb = 0`).
+   - Under standard Android 17 network settings, VPN tunnels encapsulating packets reduce the usable MTU below 1500 bytes. With `net.ipv4.tcp_mtu_probing = 0` and un-clamped TCP MSS, packets with the Don't Fragment (DF) bit set are silently discarded by intermediate routers, causing VPNs to stall, timeout, or drop connections.
+   - **Fix:** Automated PLPMTUD (`net.ipv4.tcp_mtu_probing = 1`), IPv4 & IPv6 TCP MSS Clamping (`--clamp-mss-to-pmtu`), and loose reverse path filtering (`rp_filter = 2`).
+
+7. **Conservative RAM Management & Efficiency:**
+   - **Fix:** When ZRAM is present, set `vm.page-cluster = 0` and disable ZRAM block read-ahead to avoid speculative swap-in work. Android retains control of swappiness and ZRAM sizing; scheduler, CPU governor, VFS cache, and storage queue policy are not overridden. Reduced CPU work and battery use are potential benefits, not measured results.
 
 ---
 
