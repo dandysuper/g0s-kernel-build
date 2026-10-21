@@ -195,8 +195,8 @@ adb shell /system/bin/sh /data/adb/load_drivers-backups/pr1-c18372dd-20261021/pr
 adb shell 'ASH_STANDALONE=1 /data/adb/ksu/bin/busybox ash /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe_android_lock.sh /data/adb/load_drivers-backups/pr1-c18372dd-20261021/probe-ash'
 ```
 
-The user separately authorized installing PR #1 tuning. The new staged payload
-is the exact canonical repository `load_drivers.sh` (9,906 bytes), SHA-256
+The user separately authorized installing PR #1 tuning. The newly installed
+payload is the exact canonical repository `load_drivers.sh` (9,906 bytes), SHA-256
 `02d07987d5d30e327afcbee53eed6deb41e19bdeccc3310f6fbf5f92ec4f3d91`.
 Relative to the initial phone variant, its repair prefix differs **only** by the
 FD-inheritance comment and the two explicit redirections. Its tuning is the
@@ -217,9 +217,44 @@ pre-tuning cleanup, not the original pre-cleanup watchdog version.
 
 Staged payload, installer and rollback hashes were compared between host and
 phone. Android sh and KernelSU ash syntax checks passed. The installer's
-`--check` passed all current-byte, backup, metadata, target and lock checks
-without replacing active files. Deployment completion/readback is recorded in
-the final verification update, not implied by these preinstall checks.
+`--check` passed all current-byte, backup, metadata, target and lock checks.
+The lock-protected installer then prepared **all** replacements outside startup
+directories on the same filesystem before per-file atomic renames; an error
+trap would invoke the retained rollback. This is not a single atomic three-file
+filesystem transaction. Replacement and all post-install checks passed without
+triggering rollback.
+
+All three phone files were pulled back to the Mac and compared byte-for-byte to
+the tested source. Each matches SHA-256
+`02d07987d5d30e327afcbee53eed6deb41e19bdeccc3310f6fbf5f92ec4f3d91`, UID/GID
+`0:0`, mode `0755`, context `u:object_r:adb_data_file:s0`, size 9,906, and its
+original mtime. The pulled service-stage readback was copied to Cloud and tested
+with `LOAD_DRIVERS_SCRIPT=.verification/pr1-installed.sh python3 -m unittest
+discover -s tests -v`: **all 30 passed, no skips**; its shell syntax also passed.
+There is now no separate legacy tuning variant: source and installed bytes agree.
+
+Immediate before/after observations were identical: same boot ID, SELinux
+Enforcing, `dhd`/`fingerprint`/`fingerprint_sysfs`/`bcm43xx` still loaded,
+Bluetooth/Wi-Fi/fingerprint HAL PIDs 1235/1260/1396 unchanged, both qbt nodes
+`system:system` mode `0660`, Wi-Fi enabled, swappiness `100`, and ZRAM size
+3,813,752,832 bytes. These observations are non-disruptive health checks, not
+functional hardware or performance tests. No live tunable writes were needed.
+
+Mac evidence includes `backup-manifest.json`, `deployment.diff`, per-stage
+originals and installed readbacks, shell-probe outputs, installer/rollback,
+`install-result.txt`, `before.txt`, `after.txt`, and `verification.json`. Phone
+backups were rechecked after installation. Executable, syntax-checked rollback:
+
+```bash
+# Recovery only; NOT executed during validation.
+adb shell /system/bin/sh /data/adb/load_drivers-backups/pr1-c18372dd-20261021/rollback.sh
+```
+
+It validates known current hashes, all backups/metadata, target and loader lock
+before restoring the immediately previous exact scripts and metadata. This also
+restores their original mksh lock-inheritance limitation and older forced tuning
+writes. It performs no live tuning restoration; it does not execute the loader.
+Rollback itself was not run on the live phone, which would undo this installation.
 
 Preinstall live readings already showed `page-cluster=0`, ZRAM read-ahead `0`
 and scheduler statistics `0`. Old forced settings were still fork policy `1`,
