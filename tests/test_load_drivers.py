@@ -115,6 +115,13 @@ class AndroidSandbox:
         pattern = r"(?<![A-Za-z0-9_./-])(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + r")(?=/|\b)"
         self.transformed = re.sub(pattern, lambda match: str(self.path(match.group())), source)
         self.transformed = self.transformed.replace("#!" + str(self.bin / "sh"), "#!/bin/sh", 1)
+        # BusyBox may prefer built-ins/applets over PATH commands. Functions
+        # keep mocked calls sandboxed and observable without changing the loader.
+        mock_functions = "\n".join(
+            f'{name}() {{ {shlex.quote(str(self.bin / name))} "$@"; }}'
+            for name in sorted(commands - {"sh"}))
+        self.transformed = self.transformed.replace(
+            "#!/bin/sh\n", f"#!/bin/sh\n{mock_functions}\n", 1)
         # Refuse an unhandled absolute Android path before executing any shell.
         checked = self.transformed
         for prefix in ("/proc", "/system/bin", "/vendor_dlkm", "/data", "/dev", "/sys"):
