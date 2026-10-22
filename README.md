@@ -51,9 +51,9 @@ All pre-patched, ready-to-flash partition images and modules are included direct
    - Qualcomm's Trustlet has an internal limit of 3-4 consecutive rejected touches. If a user taps rapidly in the exact same spot without moving their finger, Qualcomm `ImageFusion` rejects the touch (`BAuth_Enroll_Do Fail BAD_QUALITY : 39`). If 3 consecutive rejects occur, QFP aborts the session with error 70 (`Something went wrong. Try again.`).
    - **Fix:** TSP FOD active rectangle configured + proper enrollment technique documented.
 
-6. **VPN Drops, Path MTU Black Holes & Latency Optimization:**
+6. **VPN Drops & Path MTU Black Holes:**
    - Under standard Android 17 network settings, VPN tunnels encapsulating packets reduce the usable MTU below 1500 bytes. With `net.ipv4.tcp_mtu_probing = 0` and un-clamped TCP MSS, packets with the Don't Fragment (DF) bit set are silently discarded by intermediate routers, causing VPNs to stall, timeout, or drop connections.
-   - **Fix:** Automated PLPMTUD (`net.ipv4.tcp_mtu_probing = 1`), IPv4 & IPv6 TCP MSS Clamping (`--clamp-mss-to-pmtu`), and loose reverse path filtering (`rp_filter = 2`).
+   - **Fix:** Automated PLPMTUD (`net.ipv4.tcp_mtu_probing = 1`) and IPv4 & IPv6 TCP MSS Clamping (`--clamp-mss-to-pmtu`). Forwarding, socket buffers and reverse-path filtering stay under Android's control (see [fixes.md §8.3](fixes.md#83-tuning-implementation)).
 
 7. **Conservative RAM Management & Efficiency:**
    - **Fix:** When ZRAM is present, set `vm.page-cluster = 0` and disable ZRAM block read-ahead to avoid speculative swap-in work. Android retains control of swappiness and ZRAM sizing; scheduler, CPU governor, VFS cache, and storage queue policy are not overridden. Reduced CPU work and battery use are potential benefits, not measured results.

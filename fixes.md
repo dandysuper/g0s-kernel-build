@@ -95,9 +95,11 @@ already be mounted.
   not distinguish broken startup from intentional Wi-Fi off. The loader still
   repairs missing drivers/running HALs but never sends `set-wifi-enabled`.
   If Wi-Fi remains disabled after repair, enable it deliberately in Settings.
-- **Tuning:** Existing network, TCPMSS, scheduler-statistics and ZRAM values are
-  unchanged; successful best-effort tuning attempts are coalesced per boot.
-  Failed commands or unavailable ZRAM leave tuning retryable.
+- **Tuning:** Runs only in the asynchronous stages: MTU probing, IPv4/IPv6
+  TCPMSS clamping, scheduler statistics and ZRAM swap-in settings. Global
+  forwarding, socket buffers, TCP Fast Open and `rp_filter` are left to
+  Android. Successful items are coalesced per boot; failed commands or
+  unavailable ZRAM leave tuning retryable.
 - **Recovery:** Locks are released by the kernel on exit/crash; stale lock files
   cannot block the next invocation. A new boot ID starts fresh stage state.
   Log: `/data/adb/load_drivers.log`. Old boot-state directories are inert and
@@ -163,7 +165,7 @@ No kernel/module images or Bluetooth module ordering are changed.
 ### 8.1 VPN Stalling, Dropouts & Handshake Timeouts
 - **Root Cause A (Path MTU Black Hole):** VPN tunnels (WireGuard, OpenVPN, Cloudflare WARP MASQUE/QUIC) encapsulate network packets, reducing the usable MTU from 1500 bytes to 1280–1420 bytes. Under default Android sysctl `net.ipv4.tcp_mtu_probing = 0`, intermediate hops or tunnel endpoints that drop oversized packets with the Don't Fragment (DF) bit set without returning ICMP Fragmentation Needed create a "black hole". This caused connections to stall or drop after 15–20 seconds.
 - **Root Cause B (TCP MSS Mismatch):** When client sockets initiate connections with standard MSS (1460 bytes for IPv4, 1440 for IPv6), encapsulated packets exceed tunnel MTU. Without TCP MSS Clamping, fragmented packets were discarded by strict carrier middleboxes.
-- **Root Cause C (Strict Asymmetric Routing Drops):** On dual-connection devices (Wi-Fi + Cellular + VPN), strict reverse-path filtering (`rp_filter = 1`) dropped return packets whose ingress interface differed from the default outbound route.
+- **Root Cause C (Strict Asymmetric Routing Drops):** On dual-connection devices (Wi-Fi + Cellular + VPN), strict reverse-path filtering (`rp_filter = 1`) dropped return packets whose ingress interface differed from the default outbound route. This applies only if a vendor script enables strict mode; AOSP leaves it off (see 8.3).
 
 ### 8.2 RAM Management & Efficiency
 The runtime tuning is intentionally limited to settings directly related to ZRAM swap-in behavior:
@@ -174,25 +176,16 @@ The runtime tuning is intentionally limited to settings directly related to ZRAM
 Android remains responsible for `vm.swappiness`, ZRAM size, and CPU governor policy. The script no longer forces scheduler fork behavior, VFS cache pressure, or UFS queue/affinity settings: those choices can trade responsiveness, memory use, and power differently across workloads. Any battery-life improvement from less speculative swap-in work is a hypothesis; no battery or performance benchmark has been run.
 
 ### 8.3 Tuning Implementation
-The existing network and runtime settings are attempted by `load_drivers.sh`; unsupported or unavailable sysctls are ignored. ZRAM-specific tuning is guarded by the presence of `/sys/block/zram0`:
+`load_drivers.sh` applies this tuning only in the asynchronous `service` and `completed` stages, never on the blocking `post-fs-data` path. Each item is recorded once per boot after it succeeds; a missing sysctl counts as done, and failures stay retryable:
 ```bash
-# Network & VPN Packet Flow Fixes
-sysctl -w net.ipv4.ip_forward=1
-sysctl -w net.ipv6.conf.all.forwarding=1
+# Path MTU probing for encapsulated (VPN) traffic
 sysctl -w net.ipv4.tcp_mtu_probing=1
-sysctl -w net.ipv4.conf.all.rp_filter=2
-sysctl -w net.ipv4.conf.default.rp_filter=2
-sysctl -w net.ipv4.tcp_fastopen=3
-sysctl -w net.core.rmem_max=8388608
-sysctl -w net.core.wmem_max=8388608
-sysctl -w net.ipv4.tcp_rmem="4096 87380 8388608"
-sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"
 
-# TCP MSS Clamping for VPN Tunnels
-iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-  iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-ip6tables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-  ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+# TCP MSS clamping for VPN tunnels (IPv4 and IPv6 tracked separately)
+iptables -w 1 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -w 1 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+ip6tables -w 1 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  ip6tables -w 1 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # Scheduler accounting only; no scheduling-policy change
 sysctl -w kernel.sched_schedstats=0
@@ -205,5 +198,7 @@ if [ -d /sys/block/zram0 ]; then
   fi
 fi
 ```
+
+The script no longer enables global IPv4/IPv6 forwarding, overrides socket buffers or TCP Fast Open, or forces `rp_filter = 2`. Changing `ip_forward` resets IPv4 host settings, IPv6 forwarding switches the device to router behavior, and netd owns routing and buffers. AOSP init and netd do not set `rp_filter`, so it stays at the kernel default `0` (no source validation) unless a vendor script changes it. Check with `cat /proc/sys/net/ipv4/conf/all/rp_filter`.
 
 For on-device verification, check `cat /proc/sys/vm/page-cluster` and `cat /sys/block/zram0/queue/read_ahead_kb` when the corresponding ZRAM nodes exist. These values verify configuration only; battery impact requires a controlled device-side measurement.
