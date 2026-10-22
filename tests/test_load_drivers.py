@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SOURCE = Path(os.environ.get("LOAD_DRIVERS_SCRIPT", Path(__file__).resolve().parents[1] / "load_drivers.sh"))
@@ -153,7 +154,9 @@ class AndroidSandbox:
         directory = self.path("/data/adb/" + stage)
         directory.mkdir(parents=True, exist_ok=True)
         script = directory / "load_drivers.sh"
-        script.write_text(self.transformed)
+        # Rewriting can truncate a file that an earlier shell is still parsing.
+        if not script.exists():
+            script.write_text(self.transformed)
         return script
 
     def start(self, stage="service.d", arg=None):
@@ -219,6 +222,13 @@ class LoadDriversTests(unittest.TestCase):
             self.assertEqual(a.calls("sysctl"), first_tuning)
         self.assertEqual(len(a.calls("modprobe", "dhd")), 1)
         self.assertEqual(a.calls("lsmod"), [])
+
+    def test_repeated_starts_reuse_published_script_without_rewriting(self):
+        a = self.android
+        script = a.script("post-fs-data.d")
+        with mock.patch.object(Path, "write_text") as write:
+            self.assertEqual(a.script("post-fs-data.d"), script)
+            write.assert_not_called()
 
     def test_concurrent_repeats_are_serialized(self):
         a = self.android
