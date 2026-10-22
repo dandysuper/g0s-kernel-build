@@ -16,7 +16,8 @@ defaults:
 
 jobs:
   checks:
-    runs-on: ubuntu-22.04
+    # Ubuntu 22.04 ships erofs-utils 1.4 without mkfs.erofs -b support.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
