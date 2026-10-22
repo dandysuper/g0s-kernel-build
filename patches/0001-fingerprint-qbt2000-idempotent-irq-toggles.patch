@@ -1,0 +1,53 @@
+fingerprint: qbt2000: return success for repeated IPC/WUHB toggles
+
+The Samsung biometrics HAL sends QBT2000_ENABLE_IPC, QBT2000_DISABLE_IPC,
+QBT2000_ENABLE_WUHB and QBT2000_DISABLE_WUHB even when the interrupt is
+already in the requested state. The driver correctly skips the second
+enable_irq()/disable_irq(), but returned -EINVAL. QFPControl_DeviceEnableInt()
+treats that as fatal, so enrollment aborts halfway ("Something went wrong").
+
+This is the source form of the device-tested binary patch made by
+patch_fingerprint.py for 5.10.260-g0d060df61c11-dirty. In that module the
+patched instruction (.text+0x1dd4 in qbt2000_ioctl, mov w20, #-0x16) is the
+shared rc = -EINVAL tail reached only by these four "already ..." paths. The
+guard and its log message are unchanged; only the return value becomes 0.
+
+Applied by .github/workflows/build.yml before compiling; the build fails if
+it no longer applies to the kernel source.
+
+diff --git a/drivers/fingerprint/qbt2000_common.c b/drivers/fingerprint/qbt2000_common.c
+index f888924..0e14964 100644
+--- a/drivers/fingerprint/qbt2000_common.c
++++ b/drivers/fingerprint/qbt2000_common.c
+@@ -306,7 +306,6 @@ static int qbt2000_enable_ipc(struct qbt2000_drvdata *drvdata)
+ 
+ 	if (drvdata->fw_ipc.gpio) {
+ 		if (drvdata->enabled_ipc) {
+-			rc = -EINVAL;
+ 			pr_err("already enabled ipc\n");
+ 		} else {
+ 			enable_irq(drvdata->fw_ipc.irq);
+@@ -327,7 +326,6 @@ static int qbt2000_disable_ipc(struct qbt2000_drvdata *drvdata)
+ 			disable_irq(drvdata->fw_ipc.irq);
+ 			drvdata->enabled_ipc = false;
+ 		} else {
+-			rc = -EINVAL;
+ 			pr_err("already disabled ipc\n");
+ 		}
+ 	}
+@@ -341,7 +339,6 @@ static int qbt2000_enable_wuhb(struct qbt2000_drvdata *drvdata)
+ 
+ 	if (drvdata->fd_gpio.gpio) {
+ 		if (drvdata->enabled_wuhb) {
+-			rc = -EINVAL;
+ 			pr_err("already enabled wuhb\n");
+ 		} else {
+ 			enable_irq(drvdata->fd_gpio.irq);
+@@ -373,7 +370,6 @@ static int qbt2000_disable_wuhb(struct qbt2000_drvdata *drvdata)
+ 			disable_irq_wake(drvdata->fd_gpio.irq);
+ 			drvdata->enabled_wuhb = false;
+ 		} else {
+-			rc = -EINVAL;
+ 			pr_err("already disabled wuhb\n");
+ 		}
+ 	}

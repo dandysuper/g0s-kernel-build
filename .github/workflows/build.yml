@@ -3,9 +3,9 @@ name: Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)
 on:
   workflow_dispatch:
   push:
-    paths: ['**.py', '**.sh', '.github/workflows/build.yml']
+    paths: ['**.py', '**.sh', 'patches/**', '.github/workflows/build.yml']
   pull_request:
-    paths: ['**.py', '**.sh', '.github/workflows/build.yml']
+    paths: ['**.py', '**.sh', 'patches/**', '.github/workflows/build.yml']
 
 permissions:
   contents: read
@@ -76,6 +76,24 @@ jobs:
             echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)"
             echo "KBUILD_BUILD_TIMESTAMP=$(git show -s --format=%cD HEAD)"
           } >> "$GITHUB_ENV"
+
+      # Driver fixes ship inside the compiled modules. A patch that no longer
+      # applies stops the build here instead of producing an unfixed module.
+      - name: Apply g0s source patches
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          patches=("$GITHUB_WORKSPACE"/patches/*.patch)
+          if [ "${#patches[@]}" -eq 0 ]; then
+            echo "FATAL: no source patches found in patches/"; exit 1
+          fi
+          cd kernel
+          for patch in "${patches[@]}"; do
+            echo "Applying ${patch##*/}"
+            git apply --check --verbose "$patch"
+            git apply "$patch"
+          done
+          git diff --stat
 
       - name: Install build dependencies
         run: |
@@ -277,6 +295,9 @@ jobs:
             echo "clang_commit=$(git -C clang-prebuilt rev-parse HEAD)"
             echo "kernel_release=$(cat kernel/out/include/config/kernel.release)"
             echo "source_date_epoch=$SOURCE_DATE_EPOCH"
+            for patch in patches/*.patch; do
+              echo "source_patch=${patch##*/} sha256=$(sha256sum "$patch" | cut -d' ' -f1)"
+            done
             clang --version
           } > artifact/build-info.txt
           cd artifact
@@ -298,6 +319,7 @@ jobs:
             echo "- kernel: $VERSION"
             echo "- KernelSU Next: pinned UAPI 6 commit $KSU_REF"
             echo "- BCM4389 Wi-Fi (BCMDHD_PCIE) + BCM BT (BCM43XX): enabled"
+            echo "- Fingerprint: repeated QBT2000 IPC/WUHB toggles return success (fix compiled into fingerprint.ko)"
             echo "- r11s wireless: rejected by config gate"
             echo "- KASAN/debug-info overhead disabled; Android PSI/cgroup/uclamp features retained"
             echo "- Every module checked for exact release, ABI flags and dependency coverage"

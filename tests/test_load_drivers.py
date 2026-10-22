@@ -536,6 +536,25 @@ class LoadDriversTests(unittest.TestCase):
         a.run()
         self.assertEqual(len([c for c in a.calls("modprobe") if c[-1] == "fingerprint"]), 1)
 
+    def test_rejected_override_falls_back_to_vendor_dlkm_after_early(self):
+        # Kernels built with the source patch ship the fix in vendor_dlkm; an
+        # override left over from another build must not keep the sensor down.
+        a = self.android
+        patched = a.path("/data/adb/modules_fixed/fingerprint.ko")
+        patched.parent.mkdir(parents=True)
+        patched.touch()
+        a.configure(hal_running=True, fail=["insmod"])
+        a.run("post-fs-data.d")
+        self.assertNotIn("fingerprint", (a.root / "modules").read_text().splitlines())
+        self.assertEqual([c for c in a.calls("modprobe") if c[-1] == "fingerprint"], [])
+        a.run("service.d")
+        a.run("boot-completed.d")
+        self.assertIn("fingerprint", (a.root / "modules").read_text().splitlines())
+        self.assertEqual(len([c for c in a.calls("modprobe") if c[-1] == "fingerprint"]), 1)
+        self.assertEqual(len(a.calls("insmod", "fingerprint.ko")), 2)
+        self.assertIn("Patched override rejected", a.log())
+        self.assertEqual(len(a.calls("pkill", "android.hardware.biometrics.fingerprint")), 1)
+
     def test_hardware_repairs_preserved(self):
         a = self.android
         a.run()

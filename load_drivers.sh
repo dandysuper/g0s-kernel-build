@@ -76,8 +76,15 @@ if ! module_loaded fingerprint; then
     if [ -f /data/adb/modules_fixed/fingerprint.ko ]; then
         echo "Loading patched fingerprint.ko from /data/adb/modules_fixed/..."
         /system/bin/insmod /data/adb/modules_fixed/fingerprint.ko
+        # An override built for another kernel is rejected at every stage. Early
+        # stays retryable; later stages use vendor_dlkm, whose module carries
+        # the same fix when the kernel was built with the repository patches.
+        if ! module_loaded fingerprint && [ "$STAGE" != early ]; then
+            echo "Patched override rejected; loading vendor_dlkm fingerprint.ko..."
+            /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
+        fi
     else
-        echo "Loading stock fingerprint.ko..."
+        echo "Loading vendor_dlkm fingerprint.ko..."
         /system/bin/modprobe -d /vendor_dlkm/lib/modules fingerprint
     fi
     if module_loaded fingerprint; then

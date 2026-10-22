@@ -29,6 +29,7 @@
 ### Issue 4: Fingerprint Enrollment Failure Halfway ("Something went wrong. Try again.")
 - **Root Cause:** In `drivers/fingerprint/qbt2000_common.c`, the state transition functions (`qbt2000_disable_wuhb`, `qbt2000_enable_wuhb`, `qbt2000_disable_ipc`, `qbt2000_enable_ipc`) returned `-EINVAL` (-22) if the requested state was already active (e.g. disabling WUHB when already disabled). During enrollment, when finger positions or stages transition, the Samsung biometric HAL calls `QFPControl_DeviceEnableInt(0)` (`ioctl(fd, QBT2000_DISABLE_WUHB)`). When the kernel returned `-EINVAL`, `QFPControl_DeviceEnableInt` returned `-1`, prompting the HAL to log `enroll system fail BAuthSensorControl_DeviceEnableInt Enable Error : -1` and abort enrollment with error 8.
 - **Resolution:** Patched `fingerprint.ko` at offset `0x2088` (instruction `1dd4: mov w20, #-0x16` -> `2a1f03f4: mov w20, wzr`) so that idempotent enable/disable calls return `0` (Success). Installed the patched module to `/data/adb/modules_fixed/fingerprint.ko` and created missing Trustlet directories `/data/vendor/biometrics/{ta,bk,meta}`.
+- **Source-level fix (CI builds):** Disassembly with relocations shows `.text+0x1dd4` in `qbt2000_ioctl` is the shared `rc = -EINVAL` tail reached only by the four `already enabled/disabled ipc/wuhb` branches, and it is the module's only `mov w20, #-0x16`. [`patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`](patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch) removes exactly those four assignments, keeping each guard and log line. `build.yml` applies it before compiling and fails if it no longer applies. Builds whose `build-info.txt` lists the patch need no `/data/adb/modules_fixed` override.
 
 ---
 
@@ -76,7 +77,9 @@ already be mounted.
   verify repairs, retry missing drivers, and may briefly wait for device nodes.
   These stage passes are intentional, not duplicate full-script runs.
 - **Preserved repairs:** Prefer `/data/adb/modules_fixed/fingerprint.ko` when
-  present; otherwise use the stock module. Preserve `fingerprint_sysfs`, qbt node
+  present; otherwise use the `vendor_dlkm` module. If the override is rejected
+  (for example, left over from another kernel build), service and completed
+  fall back to `vendor_dlkm`; early stays retryable. Preserve `fingerprint_sysfs`, qbt node
   ownership/mode, fingerprint sysfs ownership, biometrics/QTI directories and
   SELinux label, FOD enable and `set_fod_rect,426,1675,654,1903`, and deletion of
   both incompatible fingerprint properties.

@@ -1,0 +1,2 @@
+# Unified-diff context lines start with a space; that is format, not whitespace damage.
+*.patch -whitespace
