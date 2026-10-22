@@ -44,7 +44,14 @@ Rebuilt the kernel from source specifically for `g0s` under LineageOS 24.0 (`bui
   - `CONFIG_KSU=y` (KernelSU Next `next` branch)
   - `CONFIG_R11S_WIRELESS=n`
   - `CONFIG_CMUCAL_DEBUG=n` (resolved `cmupmucal.ko` link failures)
-  - `CONFIG_KASAN=n` & `CONFIG_DEBUG_INFO=n` (resolved 1.84× code bloat so modules fit the 19.6 MB `vendor_dlkm` partition).
+  - `CONFIG_KASAN=n` & `CONFIG_DEBUG_INFO=n` (resolved 1.84× code bloat so modules fit the 19.6 MB `vendor_dlkm` partition)
+  - `CONFIG_TCP_CONG_BBR=y` & `CONFIG_DEFAULT_TCP_CONG="bbr"` with `CONFIG_NET_SCH_FQ=y` and `CONFIG_TCP_CONG_CUBIC=y` fallback (legacy `default m` congestion modules disabled so no extra `.ko` files are produced).
+- Applied source patches in `patches/` prior to compilation (`git apply --check` fail-closed):
+  - `0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`: return `0` on idempotent `QBT2000` IPC/WUHB IRQ enable/disable ioctls.
+  - `0002-bts-fix-bw-voting-race-and-use-rt-mutex.patch`: fix `bts_update_bw()` / `bts_calc_bw()` lock mismatch race and convert `btsdev->mutex_lock` to `rt_mutex` to prevent real-time display (`decon`) priority inversion against normal-priority multimedia bandwidth voters.
+  - `0003-cpupm-use-atomic-notifier-for-cpupm-events.patch`: replace `notifier_lock` `rwlock` + raw notifier in `exynos-cpupm.c` with an RCU-backed atomic notifier chain on CPD/DSUPD/SICD power-mode transitions.
+  - `0004-uid-sys-stats-convert-uid-lock-to-rt-mutex.patch`: convert per-bucket `uid_lock` in `uid_sys_stats.c` from `spinlock_t` to `rt_mutex` to eliminate 1.5+ ms preempt-disabled latency spikes during `BatteryStats` `/proc/uid_cputime` and `/proc/uid_io` reads.
+  - `0005-sched-backport-idle-and-fair-pelt-misfit-fixes.patch`: remove vestigial `rmb()` (`dsb ld`) from `do_idle()`, fix 1024× unscaled `se->load.weight` multiplication in `post_init_entity_util_avg()` by using `se_weight(se)`, and avoid polluting `nr_balance_failed` / `balance_interval` on `migrate_misfit` in `load_balance()`.
 - Generated partition images with uniform vermagic `5.10.260-g0d060df61c11-dirty`:
   - `boot.img`
   - `vendor_boot.img`

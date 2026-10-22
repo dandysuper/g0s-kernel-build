@@ -213,17 +213,35 @@ jobs:
           scripts/config --file out/.config --enable CC_OPTIMIZE_FOR_PERFORMANCE
           scripts/config --file out/.config --disable CC_OPTIMIZE_FOR_SIZE
 
+          # Built-in BBR + Fair Queue pacing (with CUBIC retained as fallback)
+          # and legacy default=m TCP congestion modules disabled so no extra
+          # .ko files are emitted.
+          scripts/config --file out/.config --enable NET_SCH_FQ
+          scripts/config --file out/.config --enable TCP_CONG_ADVANCED
+          scripts/config --file out/.config --enable TCP_CONG_BBR
+          scripts/config --file out/.config --enable TCP_CONG_CUBIC
+          scripts/config --file out/.config --disable TCP_CONG_BIC
+          scripts/config --file out/.config --disable TCP_CONG_WESTWOOD
+          scripts/config --file out/.config --disable TCP_CONG_HTCP
+          scripts/config --file out/.config --disable DEFAULT_CUBIC
+          scripts/config --file out/.config --enable DEFAULT_BBR
+          scripts/config --file out/.config --set-str DEFAULT_TCP_CONG bbr
+
           make -j"$(nproc)" "${MAKE_ARGS[@]}" olddefconfig
 
           # PSI/cgroups/uclamp underpin Android LMKD and task profiles; keep
           # those runtime mechanisms instead of replacing them with boot tweaks.
           for symbol in MACH_G0S_EUR_OPENX CC_IS_CLANG LD_IS_LLD CC_OPTIMIZE_FOR_PERFORMANCE \
               PSI MEMCG MEMCG_SWAP CGROUPS CPUSETS UCLAMP_TASK UCLAMP_TASK_GROUP \
-              BPF_SYSCALL BPF_JIT_ALWAYS_ON CGROUP_BPF MODULES MODVERSIONS; do
+              BPF_SYSCALL BPF_JIT_ALWAYS_ON CGROUP_BPF MODULES MODVERSIONS \
+              NET_SCH_FQ TCP_CONG_ADVANCED TCP_CONG_BBR TCP_CONG_CUBIC DEFAULT_BBR; do
             grep -qx "CONFIG_${symbol}=y" out/.config || {
               echo "FATAL: required Android/g0s config CONFIG_${symbol}=y missing"; exit 1;
             }
           done
+          grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config || {
+            echo 'FATAL: CONFIG_DEFAULT_TCP_CONG="bbr" missing'; exit 1;
+          }
 
           # If KASAN survives, the build is ~2x too big and the modules will not
           # fit. Fail here in 5 minutes rather than 90 minutes later.
@@ -239,7 +257,7 @@ jobs:
           echo "Size flags OK: KASAN off, DEBUG_INFO off, optimize=performance"
 
           echo "================ FINAL CONFIG (critical symbols) ================"
-          grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_DEBUG_FS|CONFIG_CMUCAL_DEBUG|CONFIG_MODULES|CONFIG_MODVERSIONS" out/.config | sort || true
+          grep -E "CONFIG_BCM4389|CONFIG_BCMDHD_PCIE|CONFIG_R11S_WIRELESS|CONFIG_BT_BCM43XX|CONFIG_KSU|CONFIG_DEBUG_FS|CONFIG_CMUCAL_DEBUG|CONFIG_MODULES|CONFIG_MODVERSIONS|CONFIG_TCP_CONG|CONFIG_DEFAULT_TCP_CONG|CONFIG_NET_SCH_FQ" out/.config | sort || true
           echo "================================================================"
 
           # Hard gates — fail fast instead of shipping a broken kernel
@@ -320,6 +338,8 @@ jobs:
             echo "- KernelSU Next: pinned UAPI 6 commit $KSU_REF"
             echo "- BCM4389 Wi-Fi (BCMDHD_PCIE) + BCM BT (BCM43XX): enabled"
             echo "- Fingerprint: repeated QBT2000 IPC/WUHB toggles return success (fix compiled into fingerprint.ko)"
+            echo "- Exynos BTS/CPUPM & scheduler: rt_mutex BTS bandwidth voting fix, atomic CPUPM notifier, rt_mutex uid_sys_stats, and upstream 5.10 idle/PELT/misfit scheduler fixes"
+            echo "- Networking: built-in TCP BBR default congestion control (+ Fair Queue pacing, CUBIC fallback)"
             echo "- r11s wireless: rejected by config gate"
             echo "- KASAN/debug-info overhead disabled; Android PSI/cgroup/uclamp features retained"
             echo "- Every module checked for exact release, ABI flags and dependency coverage"

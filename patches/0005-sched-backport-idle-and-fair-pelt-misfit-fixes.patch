@@ -1,0 +1,79 @@
+sched: backport upstream idle barrier removal, initial util_avg scaling, and misfit balance backoff fixes
+
+1. sched/idle: Remove the vestigial rmb() in do_idle() before
+   local_irq_disable() (upstream commit a6e33823b8 by Zhongqiu Han),
+   avoiding a redundant dsb ld barrier on every CPU idle entry.
+2. sched/fair: Use se_weight(se) instead of unscaled se->load.weight in
+   post_init_entity_util_avg() (upstream commit b850a9c1cd by Dawei Li).
+   On 64-bit arm64, cfs_rq->avg.load_avg is scaled down by 1024 while
+   se->load.weight is not, inflating every newly forked task's initial
+   util_avg by 1024x to the cap ceiling.
+3. sched/fair: Do not increment nr_balance_failed or double
+   balance_interval when migration_type == migrate_misfit fails in
+   load_balance() (upstream commit 9d858b5c62 by Qais Yousef), preventing
+   failed misfit pulls on asymmetric Cortex-A510/A710/X2 clusters from
+   triggering spurious active-balance cascades or long balance backoffs.
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -780,7 +780,8 @@ static void attach_entity_cfs_rq(struct sched_entity *se);
+  * With new tasks being created, their initial util_avgs are extrapolated
+  * based on the cfs_rq's current util_avg:
+  *
+- *   util_avg = cfs_rq->util_avg / (cfs_rq->load_avg + 1) * se.load.weight
++ *   util_avg = cfs_rq->avg.util_avg / (cfs_rq->avg.load_avg + 1)
++ *		* se_weight(se)
+  *
+  * However, in many cases, the above util_avg does not give a desired
+  * value. Moreover, the sum of the util_avgs may be divergent, such
+@@ -812,7 +813,7 @@ void post_init_entity_util_avg(struct task_struct *p)
+ 
+ 	if (cap > 0) {
+ 		if (cfs_rq->avg.util_avg != 0) {
+-			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
++			sa->util_avg  = cfs_rq->avg.util_avg * se_weight(se);
+ 			sa->util_avg /= (cfs_rq->avg.load_avg + 1);
+ 
+ 			if (sa->util_avg > cap)
+@@ -10062,8 +10063,12 @@ static int load_balance(int this_cpu, struct rq *this_rq,
+ 		 * We do not want newidle balance, which can be very
+ 		 * frequent, pollute the failure counter causing
+ 		 * excessive cache_hot migrations and active balances.
++		 *
++		 * Similarly for migration_misfit which is not related to
++		 * load/util migration, don't pollute nr_balance_failed.
+ 		 */
+-		if (idle != CPU_NEWLY_IDLE)
++		if (idle != CPU_NEWLY_IDLE &&
++		    env.migration_type != migrate_misfit)
+ 			sd->nr_balance_failed++;
+ 
+ 		if (need_active_balance(&env)) {
+@@ -10154,8 +10159,13 @@ out_one_pinned:
+ 	 * repeatedly reach this code, which would lead to balance_interval
+ 	 * skyrocketting in a short amount of time. Skip the balance_interval
+ 	 * increase logic to avoid that.
++	 *
++	 * Similarly misfit migration which is not necessarily an indication of
++	 * the system being busy and requires lb to backoff to let it settle
++	 * down.
+ 	 */
+-	if (env.idle == CPU_NEWLY_IDLE)
++	if (env.idle == CPU_NEWLY_IDLE ||
++	    env.migration_type == migrate_misfit)
+ 		goto out;
+ 
+ 	/* tune up the balancing interval */
+diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+--- a/kernel/sched/idle.c
++++ b/kernel/sched/idle.c
+@@ -302,8 +302,6 @@ static void do_idle(void)
+ 	tick_nohz_idle_enter();
+ 
+ 	while (!need_resched()) {
+-		rmb();
+-
+ 		local_irq_disable();
+ 
+ 		if (cpu_is_offline(cpu)) {
