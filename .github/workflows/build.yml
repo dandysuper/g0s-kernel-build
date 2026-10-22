@@ -38,7 +38,7 @@ jobs:
           git diff --check
 
   build:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     needs: checks
     runs-on: ubuntu-22.04
     timeout-minutes: 350
