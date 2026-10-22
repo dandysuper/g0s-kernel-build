@@ -37,7 +37,7 @@ All pre-patched, ready-to-flash partition images and modules are included direct
 
 3. **Qualcomm Fingerprint Driver Idempotency Crash (`-EINVAL` / -22):**
    - The stock Samsung `fingerprint.ko` driver returns `-EINVAL` (`-22`) when the HAL repeats an IPC or wake-up (WUHB) interrupt enable/disable ioctl for a state that is already set, which aborts enrollment halfway.
-   - **Fix:** Compiled into `fingerprint.ko` by CI builds via [`patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`](patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch): repeated requests return `0` (Success) while the driver still skips the duplicate interrupt change. The older `kernel_files/` module uses the equivalent binary patch at offset `0x2088` (`mov w20, wzr`).
+   - **Fix:** Compiled into `fingerprint.ko` by CI builds and into the repacked `kernel_files/vendor_dlkm.img` (`build-39767039887-1`) via [`patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`](patches/0001-fingerprint-qbt2000-idempotent-irq-toggles.patch): repeated requests return `0` (Success) while the driver still skips the duplicate interrupt change. Older pre-source-patch modules use the legacy binary patch at offset `0x2088` (`mov w20, wzr`).
 
 4. **LineageOS AIDL Progress Inversion Bug (`uses_percentage_samples`):**
    - Samsung's vendor biometric library (`libbauthserver.so`) already computes:
@@ -118,21 +118,16 @@ Pre-built, patched partition images are provided in the [`kernel_files/`](kernel
 ---
 
 ### Step 4: Fingerprint Driver Fix (`fingerprint.ko`)
-**Skip this step for CI builds whose `build-info.txt` lists `source_patch=0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`: their `fingerprint.ko` already contains the fix.** Older builds, including the images in `kernel_files/`, need the separate pre-patched driver `kernel_files/fingerprint_fixed.ko` (offset `0x2088` patched to `mov w20, wzr`).
+**Skip this step when flashing the current `kernel_files/` images (`build-39767039887-1`) or any CI build whose `build-info.txt` lists `source_patch=0001-fingerprint-qbt2000-idempotent-irq-toggles.patch`: their `vendor_dlkm.img` `fingerprint.ko` (and `kernel_files/fingerprint_fixed.ko`) already contains the fix compiled from source.**
 
-1. For older builds only, push the pre-patched module into KernelSU's persistent directory:
-   ```bash
-   adb shell "su -c 'mkdir -p /data/adb/modules_fixed'"
-   adb push kernel_files/fingerprint_fixed.ko /sdcard/
-   adb shell "su -c 'cp /sdcard/fingerprint_fixed.ko /data/adb/modules_fixed/fingerprint.ko && chmod 0644 /data/adb/modules_fixed/fingerprint.ko'"
-   ```
-2. After flashing a build that includes the fix, remove the override so the built-in module is used:
+1. If you previously installed an older `/data/adb/modules_fixed/fingerprint.ko` override, remove it after flashing so the `vendor_dlkm` module is used directly:
    ```bash
    adb shell "su -c 'rm -f /data/adb/modules_fixed/fingerprint.ko'"
    ```
    If an old override is left behind and the new kernel rejects it, `load_drivers.sh` falls back to the `vendor_dlkm` module from the service stage onward.
+2. For legacy pre-source-patch builds only, you can push a matching patched module into `/data/adb/modules_fixed/fingerprint.ko`.
 
-*(Note: `python3 patch_fingerprint.py <fingerprint.ko> <output.ko>` only patches the older `5.10.260-g0d060df61c11-dirty` module layout and refuses anything else, including modules that already contain the source fix.)*
+*(Note: `python3 patch_fingerprint.py <fingerprint.ko> <output.ko>` only patches the older pre-source-patch `5.10.260-g0d060df61c11-dirty` module layout and refuses anything else, including modules that already contain the source fix.)*
 
 ---
 
@@ -254,8 +249,8 @@ adb shell "dumpsys fingerprint | grep -E 'mCurrentFocus|Enrolled'"
 
 | File / Folder | Purpose |
 | :--- | :--- |
-| [`kernel_files/`](kernel_files/) | Pre-built partition images (`boot.img`, `vendor_boot.img`, `dtbo.img`, `vendor_dlkm.img`), and patched `fingerprint_fixed.ko` for those images |
-| [`patches/`](patches/) | Kernel source patches applied by CI before compiling (fingerprint IPC/WUHB fix) |
+| [`kernel_files/`](kernel_files/) | Pre-built partition images (`boot.img`, `vendor_boot.img`, `dtbo.img`, `vendor_dlkm.img`) and `fingerprint_fixed.ko` repacked from `build-39767039887-1` |
+| [`patches/`](patches/) | Kernel source patches applied by CI before compiling (`0001`–`0005`: fingerprint IPC/WUHB fix, Exynos BTS/CPUPM fixes, `uid_sys_stats` rt_mutex, 5.10 scheduler fixes) |
 | [`load_drivers.sh`](load_drivers.sh) | All-in-one boot persistence script (Wi-Fi, fingerprint, TSP FOD rect, permissions) |
 | [`patch_fingerprint.py`](patch_fingerprint.py) | Binary fix (`0x2088`, `mov w20, wzr`) for the older `kernel_files/` module only |
 | [`build_bt_patch.py`](build_bt_patch.py) | Repacks boot/vendor_boot ramdisk module manifests for KernelSU Next |

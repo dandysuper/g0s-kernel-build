@@ -36,7 +36,7 @@
 ## 2. Implemented Fixes
 
 ### A. Kernel Source Rebuild (CI)
-Rebuilt the kernel from source specifically for `g0s` under LineageOS 24.0 (`build.yml` run `39306330781`):
+Rebuilt the kernel from source specifically for `g0s` under LineageOS 24.0 (`build.yml` run `39767039887` / release `build-39767039887-1`, repacked into `kernel_files/`):
 - Hard-gated configuration:
   - `CONFIG_BCM4389=m`
   - `CONFIG_BCMDHD_PCIE=y`
