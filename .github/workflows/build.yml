@@ -232,6 +232,8 @@ jobs:
 
           make -j"$(nproc)" "${MAKE_ARGS[@]}" olddefconfig
 
+          # kernelrelease deliberately skips auto.conf synchronization in this tree.
+          make -s "${MAKE_ARGS[@]}" syncconfig
           KERNEL_RELEASE=$(make -s "${MAKE_ARGS[@]}" kernelrelease)
           test "$KERNEL_RELEASE" = "5.10.260-Jebus-Kernel" || {
             echo "FATAL: unexpected kernel name: $KERNEL_RELEASE"; exit 1;
