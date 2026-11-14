@@ -1,4 +1,4 @@
-name: Build g0s kernel (LineageOS 24.0 + KernelSU Next + BCM4389 Wi-Fi)
+name: Build Jebus Kernel (g0s + KernelSU Next dev)
 
 on:
   workflow_dispatch:
@@ -50,15 +50,16 @@ jobs:
     env:
       ARCH: arm64
       SUBARCH: arm64
-      KBUILD_BUILD_USER: g0s
-      KBUILD_BUILD_HOST: github-actions
+      KBUILD_BUILD_USER: Jebus
+      KBUILD_BUILD_HOST: Jebus-Kernel
       KBUILD_BUILD_VERSION: '1'
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: '1'
-      # The old next branch is gone; v3.4.2 is UAPI 5, not UAPI 6.
-      KSU_REF: b427a3f9c2421a443f961007bfce66b25486643f
+      # Latest dev commit verified on 2026-11-14; pin kernel and manager together.
+      KSU_REF: 7ccf61479621f240c0d968ef46f1b167b6ceb500
+      LOCALVERSION: ""
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -172,6 +173,8 @@ jobs:
           # static inline stub, so the module carries no external debug symbols
           # at all and links cleanly. The only loss is the debugfs clock tree.
           # DEBUG_FS itself stays on - it is standard and other subsystems use it.
+          scripts/config --file out/.config --set-str LOCALVERSION "-Jebus-Kernel"
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
           scripts/config --file out/.config --enable KSU
           scripts/config --file out/.config --enable DEBUG_FS
           scripts/config --file out/.config --disable CMUCAL_DEBUG
@@ -228,6 +231,11 @@ jobs:
           scripts/config --file out/.config --set-str DEFAULT_TCP_CONG bbr
 
           make -j"$(nproc)" "${MAKE_ARGS[@]}" olddefconfig
+
+          KERNEL_RELEASE=$(make -s "${MAKE_ARGS[@]}" kernelrelease)
+          test "$KERNEL_RELEASE" = "5.10.260-Jebus-Kernel" || {
+            echo "FATAL: unexpected kernel name: $KERNEL_RELEASE"; exit 1;
+          }
 
           # PSI/cgroups/uclamp underpin Android LMKD and task profiles; keep
           # those runtime mechanisms instead of replacing them with boot tweaks.
@@ -334,7 +342,7 @@ jobs:
           {
             echo "LineageOS 24.0 / Android 17 build target: g0s (Galaxy S22+, SM-S906B)."
             echo ""
-            echo "- kernel: $VERSION"
+            echo "- kernel: Jebus Kernel ($VERSION), no SCM/dirty suffix"
             echo "- KernelSU Next: pinned UAPI 6 commit $KSU_REF"
             echo "- BCM4389 Wi-Fi (BCMDHD_PCIE) + BCM BT (BCM43XX): enabled"
             echo "- Fingerprint: repeated QBT2000 IPC/WUHB toggles return success (fix compiled into fingerprint.ko)"
@@ -354,7 +362,7 @@ jobs:
             artifact/build-info.txt artifact/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --prerelease \
-            --title "g0s kernel $TAG" \
+            --title "Jebus Kernel (KernelSU Next dev) $TAG" \
             --notes-file "$NOTES"
         env:
           GH_TOKEN: ${{ github.token }}
